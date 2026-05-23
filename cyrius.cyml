@@ -1,0 +1,16 @@
+[package]
+name = "yo"
+version = "0.1.0"
+description = "yo — TODO"
+license = "GPL-3.0-only"
+language = "cyrius"
+cyrius = "6.0.1"
+
+[build]
+entry = "src/main.cyr"
+test = "src/test.cyr"
+output = "yo"
+
+[deps]
+stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert", "bench"]
+---
