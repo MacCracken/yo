@@ -8,17 +8,21 @@
 
 ## Project Identity
 
-**yo** — yo — TODO
+**yo** (English wordplay: *Yodel-Out*) — sovereign Cyrius reimplementation of `ping`. ICMP echo probe; the call across the network valley, awaiting the return.
 
-- **Type**: Binary
+- **Type**: Binary (CLI tool)
 - **License**: GPL-3.0-only
 - **Language**: Cyrius (toolchain pinned in `cyrius.cyml [package].cyrius`)
 - **Version**: `VERSION` at the project root is the source of truth — do not inline the number here
-- **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md) · [First-Party Documentation](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-documentation.md)
+- **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
+- **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/first-party/first-party-standards.md) · [First-Party Documentation](https://github.com/MacCracken/agnosticos/blob/main/docs/development/first-party/first-party-documentation.md)
+- **Shared crates**: [shared-crates.md](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/shared-crates.md)
 
 ## Goal
 
-_TODO: one-or-two-sentence mission statement. What does yo OWN in the stack? Durable — doesn't change per release._
+Own the **`ping` surface** in the AGNOS network-tools family: ICMP echo probes against IPv4 / IPv6 hosts, RTT measurement, packet-loss accounting. Cyrius-native, no POSIX `socket()` — consumes the kernel's sovereign `icmp_echo` / `net_send_raw` + `net_recv_raw` primitives per the kernel-grows-for-native-workloads rule.
+
+First entry in the **network-tools family** (English-wordplay / trickster lane). Sibling tools — `whirl` (curl/wget) and `dig` (DNS) — share the **taar** substrate library (Hindi तार, *wire/connection*); per the brainstorm-window pattern the three-consumer surface justifies `taar` as a real lib from network-tools cycle open, not a private-in-yo extraction-on-second-consumer.
 
 ## Current State
 
