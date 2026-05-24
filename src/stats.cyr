@@ -1,0 +1,105 @@
+# stats.cyr — RTT accumulator + summary formatter.
+#
+# Pure code. Microseconds internally; conversion to ms-with-2-decimals
+# happens at print time using integer math (no f64 round-trip needed
+# for the kind of precision a ping summary wants).
+#
+# Layout (40 B):
+#   +0   sent_count : i64
+#   +8   recv_count : i64
+#  +16   min_us     : i64  (STATS_MIN_UNSET sentinel until first reply)
+#  +24   max_us     : i64
+#  +32   sum_us     : i64
+
+var STATS_SIZE      = 40;
+var STATS_MIN_UNSET = 0 - 1;  # i64 sentinel; no real RTT can be negative.
+
+fn stats_new(): i64 {
+    var s = alloc(STATS_SIZE);
+    store64(s,      0);
+    store64(s + 8,  0);
+    store64(s + 16, STATS_MIN_UNSET);
+    store64(s + 24, 0);
+    store64(s + 32, 0);
+    return s;
+}
+
+# Record one successful echo reply with the measured round-trip time.
+fn stats_record_reply(s, rtt_us): i64 {
+    store64(s,      load64(s) + 1);
+    store64(s + 8,  load64(s + 8) + 1);
+    var cur_min = load64(s + 16);
+    if (cur_min == STATS_MIN_UNSET) {
+        store64(s + 16, rtt_us);
+    } else {
+        if (rtt_us < cur_min) { store64(s + 16, rtt_us); }
+    }
+    if (rtt_us > load64(s + 24)) { store64(s + 24, rtt_us); }
+    store64(s + 32, load64(s + 32) + rtt_us);
+    return 0;
+}
+
+# Record one packet sent that didn't receive a reply within the timeout.
+fn stats_record_loss(s): i64 {
+    store64(s, load64(s) + 1);
+    return 0;
+}
+
+fn stats_sent(s):    i64 { return load64(s); }
+fn stats_recv(s):    i64 { return load64(s + 8); }
+fn stats_min_us(s):  i64 { return load64(s + 16); }
+fn stats_max_us(s):  i64 { return load64(s + 24); }
+fn stats_sum_us(s):  i64 { return load64(s + 32); }
+
+# Whole-percent loss. Returns 0 when nothing was sent (the only sane
+# zero — there's no loss to report without samples).
+fn stats_loss_pct(s): i64 {
+    var sent = load64(s);
+    if (sent == 0) { return 0; }
+    var recv = load64(s + 8);
+    return ((sent - recv) * 100) / sent;
+}
+
+# Mean RTT in microseconds across received packets. 0 if none received.
+fn stats_avg_us(s): i64 {
+    var recv = load64(s + 8);
+    if (recv == 0) { return 0; }
+    return load64(s + 32) / recv;
+}
+
+# Print microseconds as ms with 2 decimal places to stdout.
+# Rounding: half-up at the 10-us mark (0.01-ms granularity).
+fn _stats_print_ms(us): i64 {
+    var hus = (us + 5) / 10;     # hundredths of a millisecond, rounded.
+    fmt_int(hus / 100);
+    syscall(1, 1, ".", 1);
+    var frac = hus % 100;
+    if (frac < 10) { syscall(1, 1, "0", 1); }
+    fmt_int(frac);
+    return 0;
+}
+
+fn _stats_puts(s): i64 { syscall(1, 1, s, strlen(s)); return 0; }
+
+# Print the summary block. Shape matches README:
+#   3 sent · 3 received · 0% loss · min/avg/max = 0.39/0.41/0.42 ms
+# When all packets are lost, the min/avg/max suffix is omitted.
+fn stats_print_summary(s): i64 {
+    fmt_int(stats_sent(s));
+    _stats_puts(" sent · ");
+    fmt_int(stats_recv(s));
+    _stats_puts(" received · ");
+    fmt_int(stats_loss_pct(s));
+    _stats_puts("% loss");
+    if (stats_recv(s) > 0) {
+        _stats_puts(" · min/avg/max = ");
+        _stats_print_ms(stats_min_us(s));
+        syscall(1, 1, "/", 1);
+        _stats_print_ms(stats_avg_us(s));
+        syscall(1, 1, "/", 1);
+        _stats_print_ms(stats_max_us(s));
+        _stats_puts(" ms");
+    }
+    syscall(1, 1, "\n", 1);
+    return 0;
+}

@@ -4,6 +4,7 @@
 include "src/icmp.cyr"
 include "src/cli.cyr"
 include "src/ipv4.cyr"
+include "src/stats.cyr"
 
 # Build a synthetic argv pointer-array from up to 8 cstring literals.
 # Pass 0 for unused slots; we'll only honor the first `ac` entries.
@@ -159,6 +160,56 @@ fn main() {
     assert(ipv4_parse("1.2.3.4a")  < 0, "trailing garbage rejected");
     assert(ipv4_parse("1234.5.6.7") < 0, "4-digit segment rejected");
     assert_eq(ipv4_parse(0), IPV4_PARSE_FAIL, "null ptr → FAIL sentinel");
+
+    # ----- stats: empty + single sample -----
+    test_group("stats basics");
+
+    var s0 = stats_new();
+    assert_eq(stats_sent(s0),     0, "fresh: sent=0");
+    assert_eq(stats_recv(s0),     0, "fresh: recv=0");
+    assert_eq(stats_loss_pct(s0), 0, "fresh: loss=0 (no division by zero)");
+    assert_eq(stats_avg_us(s0),   0, "fresh: avg=0");
+    assert_eq(stats_min_us(s0), STATS_MIN_UNSET, "fresh: min=UNSET sentinel");
+
+    stats_record_reply(s0, 1000);
+    assert_eq(stats_sent(s0),    1,    "one reply: sent=1");
+    assert_eq(stats_recv(s0),    1,    "one reply: recv=1");
+    assert_eq(stats_min_us(s0),  1000, "one reply: min=1000");
+    assert_eq(stats_max_us(s0),  1000, "one reply: max=1000");
+    assert_eq(stats_avg_us(s0),  1000, "one reply: avg=1000");
+
+    # ----- stats: loss + mixed -----
+    test_group("stats loss + mix");
+
+    var s1 = stats_new();
+    stats_record_reply(s1, 420);
+    stats_record_loss(s1);
+    assert_eq(stats_sent(s1),     2,   "mixed: sent=2");
+    assert_eq(stats_recv(s1),     1,   "mixed: recv=1");
+    assert_eq(stats_loss_pct(s1), 50,  "mixed: 50% loss");
+    assert_eq(stats_min_us(s1),   420, "loss doesn't move min");
+
+    # README example: three replies 390/410/420us.
+    var s2 = stats_new();
+    stats_record_reply(s2, 390);
+    stats_record_reply(s2, 410);
+    stats_record_reply(s2, 420);
+    assert_eq(stats_sent(s2),     3,   "readme: sent=3");
+    assert_eq(stats_recv(s2),     3,   "readme: recv=3");
+    assert_eq(stats_loss_pct(s2), 0,   "readme: 0% loss");
+    assert_eq(stats_min_us(s2),   390, "readme: min=390us");
+    assert_eq(stats_max_us(s2),   420, "readme: max=420us");
+    # avg = (390+410+420)/3 = 1220/3 = 406 (integer floor).
+    assert_eq(stats_avg_us(s2), 406, "readme: avg=406us");
+
+    # All-lost: loss=100, no min/max meaningful but accessors safe.
+    var s3 = stats_new();
+    stats_record_loss(s3);
+    stats_record_loss(s3);
+    assert_eq(stats_sent(s3),     2,   "all-lost: sent=2");
+    assert_eq(stats_recv(s3),     0,   "all-lost: recv=0");
+    assert_eq(stats_loss_pct(s3), 100, "all-lost: 100%");
+    assert_eq(stats_avg_us(s3),   0,   "all-lost: avg=0 (no samples)");
 
     return assert_summary();
 }
