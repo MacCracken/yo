@@ -1,11 +1,70 @@
 # yo test suite
 # Stdlib auto-included via cyrius.cyml
 
+include "src/icmp.cyr"
+
 fn main() {
     alloc_init();
-    test_group("smoke");
-    assert(1, "true is true");
-    assert_eq(1 + 1, 2, "math works");
+
+    # ----- checksum primitive -----
+    test_group("icmp_checksum");
+
+    # RFC 1071 §4.1 worked example: bytes 00 01 f2 03 f4 f5 f6 f7
+    # → sum 0x2DDF0 → fold 0xDDF2 → ~ = 0x220D.
+    var rfc[8];
+    store8(&rfc + 0, 0x00); store8(&rfc + 1, 0x01);
+    store8(&rfc + 2, 0xF2); store8(&rfc + 3, 0x03);
+    store8(&rfc + 4, 0xF4); store8(&rfc + 5, 0xF5);
+    store8(&rfc + 6, 0xF6); store8(&rfc + 7, 0xF7);
+    assert_eq(icmp_checksum(&rfc, 8), 0x220D, "RFC 1071 worked example");
+
+    # Empty buffer: sum=0, ~0 (16-bit) = 0xFFFF.
+    var empty[8];
+    assert_eq(icmp_checksum(&empty, 0), 0xFFFF, "checksum of zero bytes = 0xFFFF");
+
+    # Odd-length: last byte treated as high byte of a padded word.
+    # 0x12 alone → sum = 0x1200 → ~ = 0xEDFF.
+    var odd[8];
+    store8(&odd, 0x12);
+    assert_eq(icmp_checksum(&odd, 1), 0xEDFF, "odd-length padding");
+
+    # ----- build_echo_request -----
+    test_group("icmp_build_echo_request");
+
+    var pkt[64];
+    var payload[8];
+    store8(&payload + 0, 0x68); store8(&payload + 1, 0x65); # "he"
+    store8(&payload + 2, 0x6C); store8(&payload + 3, 0x6C); # "ll"
+    store8(&payload + 4, 0x6F);                              # "o"
+    var n = icmp_build_echo_request(&pkt, 0x1234, 42, &payload, 5);
+    assert_eq(n, 13, "header(8) + payload(5) = 13 bytes");
+
+    # Field placement: type=8, code=0, ident=0x1234, seq=42, all big-endian.
+    assert_eq(icmp_type(&pkt),  8,      "type = ECHO_REQUEST");
+    assert_eq(icmp_code(&pkt),  0,      "code = 0");
+    assert_eq(icmp_ident(&pkt), 0x1234, "ident round-trips");
+    assert_eq(icmp_seq(&pkt),   42,     "seq round-trips");
+    assert_eq(load8(&pkt + 4),  0x12,   "ident high byte at off 4");
+    assert_eq(load8(&pkt + 5),  0x34,   "ident low byte at off 5");
+
+    # ----- verify -----
+    test_group("icmp_verify");
+
+    assert_eq(icmp_verify(&pkt, 13), 1, "freshly built packet verifies");
+
+    # Header-only (empty payload) also verifies.
+    var hdronly[16];
+    var nh = icmp_build_echo_request(&hdronly, 1, 1, &payload, 0);
+    assert_eq(nh, 8, "header-only packet = 8 bytes");
+    assert_eq(icmp_verify(&hdronly, 8), 1, "header-only verifies");
+
+    # Tamper a payload byte → checksum no longer matches.
+    store8(&pkt + 10, load8(&pkt + 10) ^ 0xFF);
+    assert_eq(icmp_verify(&pkt, 13), 0, "tampered packet fails verify");
+
+    # Too-short buffer → reject without reading past end.
+    assert_eq(icmp_verify(&pkt, 4), 0, "len<8 rejected");
+
     return assert_summary();
 }
 

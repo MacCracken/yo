@@ -2,6 +2,7 @@
 # For unit tests, prefer adding cases to tests/yo.tcyr.
 
 include "lib/syscalls.cyr"
+include "src/icmp.cyr"
 
 fn main() {
     return 0;

@@ -12,15 +12,17 @@
 |---|---|
 | Current version | **0.1.0** (scaffold) |
 | Status | Pre-MVP — kernel ICMP syscall surface pending |
-| Build size | ~28 KB (stub `hello from yo`) |
+| Build size | ~65 KB (stub `hello from yo` + ICMP framing module, pre-DCE) |
 | Cyrius pin | 6.0.1 |
-| Tests | 2 assertions in `tests/yo.tcyr` (placeholder smoke) |
+| Tests | 15 assertions in `tests/yo.tcyr` covering ICMP framing + RFC 1071 checksum |
 | Iron-validation host | archaemenid (Beelink SER, AMD) — same machine as the agnosticos iron-burn surface |
 | Family position | First entry in network-tools family |
 
 ## In-flight work
 
-Nothing landed beyond the scaffold. Next bite per `roadmap.md` § Backlog is **0.2.x — Kernel ICMP primitive**, blocked on the agnos r8169 RX-path 5-part bundle iron-validating (Attempt 97 pending).
+- **ICMP framing module landed** (`src/icmp.cyr`, unreleased): RFC 792 echo packet builder + RFC 1071 checksum + verify. Pure code, fully unit-tested. Models the checksum on `agnos/kernel/core/net.cyr:25` so kernel-side recv-path verification stays byte-identical.
+
+Still pending: **0.2.x — Kernel ICMP primitive** in agnos (blocked on r8169 RX-path 5-part bundle iron-validating, Attempt 97 pending). When that surface lands, `src/main.cyr` calls it and hands the resulting buffer to `icmp_verify` + the field accessors already in place.
 
 ## Dependencies (current — `cyrius.cyml [deps].stdlib`)
 

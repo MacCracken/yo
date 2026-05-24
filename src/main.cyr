@@ -1,6 +1,8 @@
 # yo — main entry point
 # Stdlib auto-included via cyrius.cyml
 
+include "src/icmp.cyr"
+
 fn main() {
     alloc_init();
     println("hello from yo");
