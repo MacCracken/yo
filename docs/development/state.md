@@ -2,7 +2,7 @@
 
 > **⚠ NOT A LOG.** Live state with pointers — current truth only. Per-release history → [`../../CHANGELOG.md`](../../CHANGELOG.md). Milestone path → [`roadmap.md`](roadmap.md).
 >
-> **Last refresh**: 2026-05-23 (scaffold cut).
+> **Last refresh**: 2026-05-23 (0.3.0 cut — Linux MVP).
 
 ---
 
@@ -10,7 +10,7 @@
 
 | Field | Value |
 |---|---|
-| Current version | **0.1.0** (scaffold tag); unreleased Linux MVP on `main` |
+| Current version | **0.3.0** — first working release (Linux MVP) |
 | Status | **Linux MVP working** — real ICMP probes via SOCK_DGRAM. AGNOS backend pending kernel surface. |
 | Build size | ~70 KB (full Linux MVP, pre-DCE) |
 | Cyrius pin | 6.0.1 |
@@ -30,10 +30,11 @@
 - `src/ipv4.cyr` — strict dotted-quad parser. Matches `agnos/kernel/core/net.cyr:21` `ip4()` packing.
 - `src/stats.cyr` + `src/output.cyr` — RTT accumulator + README-shaped output.
 
-Still pending (not blockers):
-- **Ctrl-C signal handler** — currently Ctrl-C kills mid-loop without summary. Needs `sys_rt_sigaction` plumbing.
-- **DNS resolution** — hostnames print a DNS-pending message. Will roll into yo inline; extraction to `taar` waits for `dig` to grow into a real consumer.
+Next milestone: **0.4.x — DNS + UX polish** (inline DNS resolver, reverse DNS, multiple targets, TTL display). All Linux-backend feature work; no platform-layer changes needed. See [`roadmap.md`](roadmap.md) for the full path to 1.0.
+
+Pending later:
 - **AGNOS backend** (`src/platform_agnos.cyr`) — pending the kernel ICMP surface in agnos (blocked on r8169 RX-path 5-part bundle iron-validating, Attempt 97 pending). Slots in as a sibling to `platform_linux.cyr` with no changes to `probe.cyr`.
+- **`taar` substrate extraction** — waits for `dig` to grow into a real second consumer.
 
 ## Dependencies (current — `cyrius.cyml [deps].stdlib`)
 

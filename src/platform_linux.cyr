@@ -17,15 +17,17 @@
 #   2. Fallback to SOCK_RAW + IPPROTO_ICMP — needs root or CAP_NET_RAW.
 #   3. Both fail → return negative, caller surfaces the EACCES.
 
-var _LX_SYS_READ          = 0;
-var _LX_SYS_WRITE         = 1;
-var _LX_SYS_CLOSE         = 3;
-var _LX_SYS_NANOSLEEP     = 35;
-var _LX_SYS_SOCKET        = 41;
-var _LX_SYS_SENDTO        = 44;
-var _LX_SYS_RECVFROM      = 45;
-var _LX_SYS_SETSOCKOPT    = 54;
-var _LX_SYS_CLOCK_GETTIME = 228;
+var _LX_SYS_READ            = 0;
+var _LX_SYS_WRITE           = 1;
+var _LX_SYS_CLOSE           = 3;
+var _LX_SYS_RT_SIGPROCMASK  = 14;
+var _LX_SYS_NANOSLEEP       = 35;
+var _LX_SYS_SOCKET          = 41;
+var _LX_SYS_SENDTO          = 44;
+var _LX_SYS_RECVFROM        = 45;
+var _LX_SYS_SETSOCKOPT      = 54;
+var _LX_SYS_CLOCK_GETTIME   = 228;
+var _LX_SYS_SIGNALFD4       = 289;
 
 var _LX_AF_INET       = 2;
 var _LX_SOCK_DGRAM    = 2;
@@ -34,6 +36,10 @@ var _LX_IPPROTO_ICMP  = 1;
 var _LX_SOL_SOCKET    = 1;
 var _LX_SO_RCVTIMEO   = 20;
 var _LX_CLOCK_MONOTONIC = 1;
+var _LX_SIG_BLOCK     = 0;
+var _LX_SIGINT        = 2;
+var _LX_SFD_NONBLOCK  = 2048;     # O_NONBLOCK octal 04000
+var _LX_SIGINFO_SIZE  = 128;      # sizeof(struct signalfd_siginfo)
 
 # Open an ICMP socket. Tries unprivileged SOCK_DGRAM first; falls back
 # to SOCK_RAW. Returns fd ≥ 0 on success, negative on failure (the
@@ -107,4 +113,31 @@ fn platform_sleep_ms(ms): i64 {
     store64(ts,     ms / 1000);
     store64(ts + 8, (ms % 1000) * 1000000);
     return syscall(_LX_SYS_NANOSLEEP, ts, 0);
+}
+
+# Install Ctrl-C handling via signalfd. Avoids the rt_sigaction +
+# sa_restorer trampoline that x86_64 requires (Cyrius has no inline
+# asm to provide the restorer). Strategy:
+#   1. Block SIGINT in this thread via rt_sigprocmask so the kernel
+#      won't deliver it through the default-terminate path.
+#   2. Create a non-blocking signalfd that fires when SIGINT arrives.
+#   3. Caller polls platform_check_interrupted between iterations.
+#
+# Returns the signalfd (≥0) or the negated errno on failure.
+fn platform_install_interrupt_watch(): i64 {
+    var mask = alloc(8);
+    store64(mask, 1 << (_LX_SIGINT - 1));   # sigset bit for SIGINT
+    syscall(_LX_SYS_RT_SIGPROCMASK, _LX_SIG_BLOCK, mask, 0, 8);
+    return syscall(_LX_SYS_SIGNALFD4, 0 - 1, mask, 8, _LX_SFD_NONBLOCK);
+}
+
+# Non-blocking check: returns 1 if a SIGINT has been queued since the
+# last call (drained), 0 if nothing pending. fd ≤ 0 (open failed)
+# always returns 0 so probe loops degrade gracefully.
+fn platform_check_interrupted(fd): i64 {
+    if (fd <= 0) { return 0; }
+    var buf = alloc(_LX_SIGINFO_SIZE);
+    var n = syscall(_LX_SYS_READ, fd, buf, _LX_SIGINFO_SIZE);
+    if (n > 0) { return 1; }
+    return 0;
 }

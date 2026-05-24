@@ -45,8 +45,11 @@ fn probe_run(target_cstr, packed_addr, count, timeout_ms, interval_ms, size, qui
     var s = stats_new();
     if (quiet == 0) { output_banner(target_cstr, size); }
 
+    var sigfd = platform_install_interrupt_watch();
+
     var seq = 0;
     while (seq < count) {
+        if (platform_check_interrupted(sigfd) == 1) { break; }
         var pkt_len = icmp_build_echo_request(pkt, ident, seq, payload, size);
 
         var t0 = platform_now_us();
@@ -77,11 +80,15 @@ fn probe_run(target_cstr, packed_addr, count, timeout_ms, interval_ms, size, qui
         }
 
         seq = seq + 1;
-        if (seq < count) { platform_sleep_ms(interval_ms); }
+        if (seq < count) {
+            if (platform_check_interrupted(sigfd) == 1) { break; }
+            platform_sleep_ms(interval_ms);
+        }
     }
 
     output_summary(s);
     platform_close(fd);
+    if (sigfd > 0) { platform_close(sigfd); }
 
     if (stats_recv(s) > 0) { return 0; }
     return 1;
