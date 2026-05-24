@@ -1,0 +1,110 @@
+# cli.cyr — yo CLI surface (flag registration + parse + accessors).
+#
+# Thin wrapper over lib/flags.cyr that owns yo's flag inventory and
+# defaults per roadmap.md § 0.3.x. Built so cli_parse_argv() can be
+# unit-tested with a synthetic argv pointer-array; no /proc reads here.
+#
+# Flags (matches POSIX ping where shapes overlap):
+#   -h, --help              show help, exit 0
+#   -c, --count    <int>    echo packets to send                (default 4)
+#   -W, --timeout  <int>    per-packet timeout, ms              (default 1000)
+#   -i, --interval <int>    inter-packet delay, ms              (default 1000)
+#   -s, --size     <int>    payload bytes                       (default 56)
+#   -q, --quiet             summary only, no per-packet output
+#   -v, --verbose           per-packet detail
+#
+# Positional: <host> — required unless --help.
+
+var YO_DEFAULT_COUNT       = 4;
+var YO_DEFAULT_TIMEOUT_MS  = 1000;
+var YO_DEFAULT_INTERVAL_MS = 1000;
+var YO_DEFAULT_SIZE        = 56;
+
+enum CliResult {
+    CLI_OK                  = 0;
+    CLI_HELP                = 1;
+    CLI_ERR_PARSE           = 2;
+    CLI_ERR_MISSING_TARGET  = 3;
+    CLI_ERR_NEGATIVE        = 4;
+}
+
+# Registry layout (64 B): flags context + 7 flag indices.
+var CLI_REG_SIZE = 64;
+
+fn _cli_reg_ctx(r):       i64 { return load64(r); }
+fn _cli_reg_help(r):      i64 { return load64(r + 8); }
+fn _cli_reg_count(r):     i64 { return load64(r + 16); }
+fn _cli_reg_timeout(r):   i64 { return load64(r + 24); }
+fn _cli_reg_interval(r):  i64 { return load64(r + 32); }
+fn _cli_reg_size(r):      i64 { return load64(r + 40); }
+fn _cli_reg_quiet(r):     i64 { return load64(r + 48); }
+fn _cli_reg_verbose(r):   i64 { return load64(r + 56); }
+
+# Build a fresh registry: alloc context, flags_new, register every
+# flag, stash the indices. Caller hands the returned ptr to every
+# cli_* function. ASCII short_ch values: h=104, c=99, W=87, i=105,
+# s=115, q=113, v=118.
+fn cli_new(): i64 {
+    var r = alloc(CLI_REG_SIZE);
+    var fs = flags_new();
+    store64(r,      fs);
+    store64(r + 8,  flags_add_bool(fs, 104, "help",     0,                       "show this help"));
+    store64(r + 16, flags_add_int (fs,  99, "count",    YO_DEFAULT_COUNT,        "echo packets to send"));
+    store64(r + 24, flags_add_int (fs,  87, "timeout",  YO_DEFAULT_TIMEOUT_MS,   "per-packet timeout (ms)"));
+    store64(r + 32, flags_add_int (fs, 105, "interval", YO_DEFAULT_INTERVAL_MS,  "inter-packet delay (ms)"));
+    store64(r + 40, flags_add_int (fs, 115, "size",     YO_DEFAULT_SIZE,         "payload bytes"));
+    store64(r + 48, flags_add_bool(fs, 113, "quiet",    0,                       "summary only"));
+    store64(r + 56, flags_add_bool(fs, 118, "verbose",  0,                       "per-packet detail"));
+    return r;
+}
+
+# Parse argv into the registry. argv must be a pointer to argc cstr
+# pointers (laid out as `argv + i*8`), same shape lib/flags.cyr wants.
+# Returns CliResult — caller dispatches on it. Validation: rejects
+# negative count/timeout/interval/size; treats --help as a non-error
+# terminal state so caller can print help and exit 0.
+fn cli_parse_argv(reg, argc, argv): i64 {
+    var fs = _cli_reg_ctx(reg);
+    var rc = flags_parse(fs, argc, argv);
+    if (rc != 0) { return CLI_ERR_PARSE; }
+    if (flags_get_bool(fs, _cli_reg_help(reg)) == 1) { return CLI_HELP; }
+    if (flags_get_int(fs, _cli_reg_count(reg))    < 0) { return CLI_ERR_NEGATIVE; }
+    if (flags_get_int(fs, _cli_reg_timeout(reg))  < 0) { return CLI_ERR_NEGATIVE; }
+    if (flags_get_int(fs, _cli_reg_interval(reg)) < 0) { return CLI_ERR_NEGATIVE; }
+    if (flags_get_int(fs, _cli_reg_size(reg))     < 0) { return CLI_ERR_NEGATIVE; }
+    if (flags_positional_count(fs) == 0) { return CLI_ERR_MISSING_TARGET; }
+    return CLI_OK;
+}
+
+# Accessors — all read from the underlying flags context, so they
+# reflect parsed values OR registered defaults.
+fn cli_help(reg):        i64 { return flags_get_bool(_cli_reg_ctx(reg), _cli_reg_help(reg)); }
+fn cli_count(reg):       i64 { return flags_get_int (_cli_reg_ctx(reg), _cli_reg_count(reg)); }
+fn cli_timeout_ms(reg):  i64 { return flags_get_int (_cli_reg_ctx(reg), _cli_reg_timeout(reg)); }
+fn cli_interval_ms(reg): i64 { return flags_get_int (_cli_reg_ctx(reg), _cli_reg_interval(reg)); }
+fn cli_size(reg):        i64 { return flags_get_int (_cli_reg_ctx(reg), _cli_reg_size(reg)); }
+fn cli_quiet(reg):       i64 { return flags_get_bool(_cli_reg_ctx(reg), _cli_reg_quiet(reg)); }
+fn cli_verbose(reg):     i64 { return flags_get_bool(_cli_reg_ctx(reg), _cli_reg_verbose(reg)); }
+
+# First positional argument = target host. Returns 0 if none.
+fn cli_target(reg): i64 {
+    return flags_positional(_cli_reg_ctx(reg), 0);
+}
+
+# Print "Usage: ..." line to the given fd (1 stdout, 2 stderr).
+fn cli_print_usage(fd): i64 {
+    var u = "Usage: yo [-c count] [-W timeout_ms] [-i interval_ms] [-s size] [-q|-v] <host>\n";
+    syscall(1, fd, u, strlen(u));
+    return 0;
+}
+
+# Print full help (usage + flag list) to stdout. Wraps flags_print_help.
+fn cli_print_help(reg): i64 {
+    println("yo — ICMP echo probe");
+    println("");
+    cli_print_usage(1);
+    println("");
+    println("Options:");
+    flags_print_help(_cli_reg_ctx(reg));
+    return 0;
+}

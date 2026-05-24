@@ -2,6 +2,19 @@
 # Stdlib auto-included via cyrius.cyml
 
 include "src/icmp.cyr"
+include "src/cli.cyr"
+
+# Build a synthetic argv pointer-array from up to 8 cstring literals.
+# Pass 0 for unused slots; we'll only honor the first `ac` entries.
+# Returns a heap ptr that lib/flags.cyr can index as `argv + i*8`.
+fn _mk_argv(a0, a1, a2, a3, a4, a5, a6, a7): i64 {
+    var av = alloc(8 * 8);
+    store64(av + 0,  a0); store64(av + 8,  a1);
+    store64(av + 16, a2); store64(av + 24, a3);
+    store64(av + 32, a4); store64(av + 40, a5);
+    store64(av + 48, a6); store64(av + 56, a7);
+    return av;
+}
 
 fn main() {
     alloc_init();
@@ -64,6 +77,60 @@ fn main() {
 
     # Too-short buffer → reject without reading past end.
     assert_eq(icmp_verify(&pkt, 4), 0, "len<8 rejected");
+
+    # ----- CLI parse: defaults -----
+    test_group("cli defaults");
+
+    var reg_d = cli_new();
+    var av_d = _mk_argv("yo", "192.168.1.1", 0, 0, 0, 0, 0, 0);
+    assert_eq(cli_parse_argv(reg_d, 2, av_d), CLI_OK, "bare target parses");
+    assert_eq(cli_count(reg_d),       YO_DEFAULT_COUNT,       "default count");
+    assert_eq(cli_timeout_ms(reg_d),  YO_DEFAULT_TIMEOUT_MS,  "default timeout");
+    assert_eq(cli_interval_ms(reg_d), YO_DEFAULT_INTERVAL_MS, "default interval");
+    assert_eq(cli_size(reg_d),        YO_DEFAULT_SIZE,        "default size");
+    assert_eq(cli_quiet(reg_d),   0, "quiet off by default");
+    assert_eq(cli_verbose(reg_d), 0, "verbose off by default");
+    assert_eq(streq(cli_target(reg_d), "192.168.1.1"), 1, "target captured");
+
+    # ----- CLI parse: short forms -----
+    test_group("cli short forms");
+
+    var reg_s = cli_new();
+    var av_s = _mk_argv("yo", "-c", "10", "-W", "500", "-s", "64", "8.8.8.8");
+    assert_eq(cli_parse_argv(reg_s, 8, av_s), CLI_OK, "short forms parse");
+    assert_eq(cli_count(reg_s),      10,    "-c 10");
+    assert_eq(cli_timeout_ms(reg_s), 500,   "-W 500");
+    assert_eq(cli_size(reg_s),       64,    "-s 64");
+    assert_eq(streq(cli_target(reg_s), "8.8.8.8"), 1, "trailing target");
+
+    # ----- CLI parse: long forms -----
+    test_group("cli long forms");
+
+    var reg_l = cli_new();
+    var av_l = _mk_argv("yo", "--interval", "250", "--quiet", "--verbose", "router", 0, 0);
+    assert_eq(cli_parse_argv(reg_l, 6, av_l), CLI_OK, "long forms parse");
+    assert_eq(cli_interval_ms(reg_l), 250, "--interval 250");
+    assert_eq(cli_quiet(reg_l),       1,   "--quiet set");
+    assert_eq(cli_verbose(reg_l),     1,   "--verbose set");
+
+    # ----- CLI parse: errors -----
+    test_group("cli errors");
+
+    var reg_m = cli_new();
+    var av_m = _mk_argv("yo", 0, 0, 0, 0, 0, 0, 0);
+    assert_eq(cli_parse_argv(reg_m, 1, av_m), CLI_ERR_MISSING_TARGET, "no positional → MISSING_TARGET");
+
+    var reg_n = cli_new();
+    var av_n = _mk_argv("yo", "-c", "-3", "host", 0, 0, 0, 0);
+    assert_eq(cli_parse_argv(reg_n, 4, av_n), CLI_ERR_NEGATIVE, "negative count rejected");
+
+    var reg_h = cli_new();
+    var av_h = _mk_argv("yo", "-h", 0, 0, 0, 0, 0, 0);
+    assert_eq(cli_parse_argv(reg_h, 2, av_h), CLI_HELP, "-h returns CLI_HELP");
+
+    var reg_u = cli_new();
+    var av_u = _mk_argv("yo", "--nope", "host", 0, 0, 0, 0, 0);
+    assert_eq(cli_parse_argv(reg_u, 3, av_u), CLI_ERR_PARSE, "unknown long flag → CLI_ERR_PARSE");
 
     return assert_summary();
 }

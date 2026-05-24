@@ -2,10 +2,60 @@
 # Stdlib auto-included via cyrius.cyml
 
 include "src/icmp.cyr"
+include "src/cli.cyr"
+
+# Build a contiguous argv pointer array (cstr*) from args.cyr's
+# argc()/argv(n) surface. flags_parse() reads `argv + i*8`, but
+# args.cyr exposes argv only as a function — so we materialize.
+fn _materialize_argv(ac): i64 {
+    var av = alloc(ac * 8);
+    var i = 0;
+    while (i < ac) {
+        store64(av + i * 8, argv(i));
+        i = i + 1;
+    }
+    return av;
+}
+
+# Print one literal to stdout via strlen — avoids hand-counted lengths
+# (which were one-off-leaking adjacent string-table memory in v0.1.0
+# of this banner).
+fn _puts(s): i64 { syscall(1, 1, s, strlen(s)); return 0; }
+
+# Print the banner for a planned probe. Stand-in for real per-packet
+# output until roadmap.md § 0.2.x lands the kernel ICMP surface.
+fn _print_planned(reg): i64 {
+    _puts("yo ");
+    var t = cli_target(reg);
+    _puts(t);
+    _puts(" — ");
+    fmt_int(cli_count(reg));
+    _puts(" echoes × ");
+    fmt_int(cli_size(reg));
+    _puts(" bytes (timeout=");
+    fmt_int(cli_timeout_ms(reg));
+    _puts("ms, interval=");
+    fmt_int(cli_interval_ms(reg));
+    println("ms)");
+    println("  (kernel ICMP surface pending — see docs/development/roadmap.md § 0.2.x)");
+    return 0;
+}
 
 fn main() {
     alloc_init();
-    println("hello from yo");
+    args_init();
+
+    var reg = cli_new();
+    var ac = argc();
+    var av = _materialize_argv(ac);
+    var rc = cli_parse_argv(reg, ac, av);
+
+    if (rc == CLI_HELP)               { cli_print_help(reg); return 0; }
+    if (rc == CLI_ERR_PARSE)          { var e1 = "yo: bad option\n";          syscall(1, 2, e1, strlen(e1)); cli_print_usage(2); return 2; }
+    if (rc == CLI_ERR_NEGATIVE)       { var e2 = "yo: negative value\n";      syscall(1, 2, e2, strlen(e2)); cli_print_usage(2); return 2; }
+    if (rc == CLI_ERR_MISSING_TARGET) { var e3 = "yo: missing target host\n"; syscall(1, 2, e3, strlen(e3)); cli_print_usage(2); return 2; }
+
+    _print_planned(reg);
     return 0;
 }
 

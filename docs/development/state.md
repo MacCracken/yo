@@ -12,27 +12,28 @@
 |---|---|
 | Current version | **0.1.0** (scaffold) |
 | Status | Pre-MVP — kernel ICMP syscall surface pending |
-| Build size | ~65 KB (stub `hello from yo` + ICMP framing module, pre-DCE) |
+| Build size | ~68 KB (CLI + ICMP framing, pre-DCE) |
 | Cyrius pin | 6.0.1 |
-| Tests | 15 assertions in `tests/yo.tcyr` covering ICMP framing + RFC 1071 checksum |
+| Tests | 36 assertions in `tests/yo.tcyr` covering ICMP framing + RFC 1071 checksum + CLI parse |
 | Iron-validation host | archaemenid (Beelink SER, AMD) — same machine as the agnosticos iron-burn surface |
 | Family position | First entry in network-tools family |
 
 ## In-flight work
 
 - **ICMP framing module landed** (`src/icmp.cyr`, unreleased): RFC 792 echo packet builder + RFC 1071 checksum + verify. Pure code, fully unit-tested. Models the checksum on `agnos/kernel/core/net.cyr:25` so kernel-side recv-path verification stays byte-identical.
+- **CLI surface landed** (`src/cli.cyr` + `src/main.cyr`, unreleased): full flag inventory per roadmap 0.3.x (`-c -W -i -s -q -v -h` + long forms) wired through `lib/flags.cyr`. `yo <host>` parses cleanly and prints a planned-probe banner; the call site where the kernel ICMP loop will slot is the `_print_planned()` body. yo is the first consumer of `lib/flags.cyr` in the ecosystem.
 
-Still pending: **0.2.x — Kernel ICMP primitive** in agnos (blocked on r8169 RX-path 5-part bundle iron-validating, Attempt 97 pending). When that surface lands, `src/main.cyr` calls it and hands the resulting buffer to `icmp_verify` + the field accessors already in place.
+Still pending: **0.2.x — Kernel ICMP primitive** in agnos (blocked on r8169 RX-path 5-part bundle iron-validating, Attempt 97 pending). When that surface lands, replace the `_print_planned()` placeholder with the real send/recv/verify loop using the already-tested `icmp_*` helpers.
 
 ## Dependencies (current — `cyrius.cyml [deps].stdlib`)
 
 ```
-string fmt alloc io vec str syscalls assert bench
+string fmt alloc io vec str syscalls assert bench args flags
 ```
 
-Stdlib-only at scaffold. Will grow:
+`args` + `flags` added when CLI landed. Will grow further:
 
-- **0.3.x**: + `args`, `flags` (CLI parsing), `net` (kernel network primitives — vendored from `agnos/kernel/core/net.cyr` patterns or via the kernel-syscall surface).
+- **0.3.x (remainder)**: + `net` (kernel network primitives — vendored from `agnos/kernel/core/net.cyr` patterns or via the kernel-syscall surface).
 - **0.4.x**: + DNS resolution primitives, IPv6 framing helpers.
 - **0.6.x**: `taar` extraction moves network primitives OUT of `yo`'s vendored stdlib INTO a sibling repo. `cyrius.cyml [deps]` gains `taar = { path = "../taar" }` or registry equivalent.
 
