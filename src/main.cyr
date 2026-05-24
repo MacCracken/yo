@@ -69,6 +69,7 @@ fn main() {
     var parens_buf = alloc(256);
     var v6buf      = alloc(16);
     var v6resolved = alloc(16);
+    var zone_buf   = alloc(64);
     var force_v4   = cli_ipv4(reg);
     var force_v6   = cli_ipv6(reg);
     var numeric    = cli_numeric(reg);
@@ -82,6 +83,7 @@ fn main() {
 
         var af       = 0;
         var addr_arg = 0;
+        var scope_id = 0;
         var parens   = 0;
 
         # Literal IPv4 — only if not forcing v6.
@@ -98,14 +100,44 @@ fn main() {
             }
         }
 
-        # Literal IPv6 — only if no v4 hit and not forcing v4.
+        # Literal IPv6 (with optional `%zone` scope-id) — only if no
+        # v4 hit and not forcing v4. IPv4-mapped (`::ffff:a.b.c.d`)
+        # collapses to the IPv4 path because ICMPv6 sockets can't
+        # carry an ICMPv4 probe to a v4 destination (kernel won't
+        # auto-translate). Scope on a mapped address is meaningless
+        # and gets dropped silently.
         if ((af == 0) && (force_v4 == 0)) {
-            if (ipv6_parse(target, v6buf) == 0) {
-                af = 6;
-                addr_arg = v6buf;
-                if (numeric == 0) {
-                    if (dns_reverse_resolve_v6(v6buf, parens_buf, 256) > 0) {
-                        parens = parens_buf;
+            var zlen = ipv6_parse_ex(target, v6buf, zone_buf, 64);
+            if (zlen >= 0) {
+                if (ipv6_is_v4_mapped(v6buf) == 1) {
+                    af = 4;
+                    addr_arg = (load8(v6buf + 12) << 24)
+                             | (load8(v6buf + 13) << 16)
+                             | (load8(v6buf + 14) << 8)
+                             |  load8(v6buf + 15);
+                    if (numeric == 0) {
+                        if (dns_reverse_resolve(addr_arg, parens_buf, 256) > 0) {
+                            parens = parens_buf;
+                        }
+                    }
+                } else {
+                    af = 6;
+                    addr_arg = v6buf;
+                    if (zlen > 0) {
+                        scope_id = platform_resolve_ifindex(zone_buf);
+                        if (scope_id <= 0) {
+                            _eputs("yo: unknown interface: ");
+                            _eputs(zone_buf);
+                            _emit_lf(2);
+                            any_error = 1;
+                            i = i + 1;
+                            continue;
+                        }
+                    }
+                    if (numeric == 0) {
+                        if (dns_reverse_resolve_v6(v6buf, parens_buf, 256) > 0) {
+                            parens = parens_buf;
+                        }
                     }
                 }
             }
@@ -145,6 +177,7 @@ fn main() {
             target,
             af,
             addr_arg,
+            scope_id,
             parens,
             cli_count(reg),
             cli_timeout_ms(reg),

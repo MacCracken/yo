@@ -711,6 +711,28 @@ fn main() {
     assert_eq(output_ipv6_to_buf(&ia, &ib6), 15, "single zero kept = 15 bytes");
     assert_eq(streq(&ib6, "1:0:1:1:1:1:1:1"), 1, "single zero not compressed");
 
+    # IPv4-mapped (RFC 5952 §5): "::ffff:127.0.0.1"
+    jj = 0; while (jj < 16) { store8(&ia + jj, 0); jj = jj + 1; }
+    store8(&ia + 10, 0xFF); store8(&ia + 11, 0xFF);
+    store8(&ia + 12, 127);  store8(&ia + 13, 0);
+    store8(&ia + 14, 0);    store8(&ia + 15, 1);
+    assert_eq(output_ipv6_to_buf(&ia, &ib6), 16, "::ffff:127.0.0.1 = 16 bytes");
+    assert_eq(streq(&ib6, "::ffff:127.0.0.1"), 1, "v4-mapped cstr");
+
+    # IPv4-mapped max octets: "::ffff:255.255.255.255" = 22 bytes
+    store8(&ia + 12, 255); store8(&ia + 13, 255);
+    store8(&ia + 14, 255); store8(&ia + 15, 255);
+    assert_eq(output_ipv6_to_buf(&ia, &ib6), 22, "::ffff:255.255.255.255 len");
+    assert_eq(streq(&ib6, "::ffff:255.255.255.255"), 1, "v4-mapped max cstr");
+
+    # IPv4-compatible (`::1.2.3.4`, 10+2 zero bytes, NO 0xffff) MUST NOT
+    # use the mapped form per RFC 5952 §5 — render as plain `::102:304`.
+    jj = 0; while (jj < 16) { store8(&ia + jj, 0); jj = jj + 1; }
+    store8(&ia + 12, 1); store8(&ia + 13, 2);
+    store8(&ia + 14, 3); store8(&ia + 15, 4);
+    assert_eq(output_ipv6_to_buf(&ia, &ib6), 9, "::102:304 = 9 bytes");
+    assert_eq(streq(&ib6, "::102:304"), 1, "v4-compat stays plain hex");
+
     # ----- CLI: -n / --numeric -----
     test_group("cli numeric flag");
 
@@ -861,9 +883,82 @@ fn main() {
     assert(ipv6_parse("1:2:3:4:5:6:7:8:9",      &v6) < 0, "9 groups rejected");
     assert(ipv6_parse("1:2:3:4:5:6:7:8::",      &v6) < 0, ":: with full 8 groups rejected (gap < 1)");
     assert(ipv6_parse("g::1",                   &v6) < 0, "non-hex digit rejected");
-    assert(ipv6_parse("fe80::1%eth0",           &v6) < 0, "scope-id rejected (0.5.0 scope)");
-    assert(ipv6_parse("::ffff:1.2.3.4",         &v6) < 0, "IPv4-embedded form rejected (0.5.1 scope)");
+    assert(ipv6_parse("fe80::1%eth0",           &v6) < 0, "scope-id rejected by ipv6_parse (use _ex)");
     assert_eq(ipv6_parse(0, &v6), IPV6_PARSE_FAIL, "null ptr → FAIL");
+
+    # ----- ipv6_parse: IPv4-embedded textual form (RFC 4291 §2.2.3) -----
+    test_group("ipv6_parse embedded v4");
+
+    # ::ffff:1.2.3.4 → IPv4-mapped: 10 zero bytes, ff ff, then 01 02 03 04
+    assert_eq(ipv6_parse("::ffff:1.2.3.4", &v6), 0, "::ffff:1.2.3.4 parses");
+    var pz = 0;
+    while (pz < 10) { assert_eq(load8(&v6 + pz), 0, "mapped lead zero"); pz = pz + 1; }
+    assert_eq(load8(&v6 + 10), 0xFF, "mapped byte 10 = ff");
+    assert_eq(load8(&v6 + 11), 0xFF, "mapped byte 11 = ff");
+    assert_eq(load8(&v6 + 12), 1,    "mapped byte 12 = 1");
+    assert_eq(load8(&v6 + 13), 2,    "mapped byte 13 = 2");
+    assert_eq(load8(&v6 + 14), 3,    "mapped byte 14 = 3");
+    assert_eq(load8(&v6 + 15), 4,    "mapped byte 15 = 4");
+
+    # ::1.2.3.4 (IPv4-compatible, deprecated but still parseable) →
+    # 12 zero bytes then 01 02 03 04
+    assert_eq(ipv6_parse("::1.2.3.4", &v6), 0, "::1.2.3.4 parses");
+    var pcz = 0;
+    while (pcz < 12) { assert_eq(load8(&v6 + pcz), 0, "compat lead zero"); pcz = pcz + 1; }
+    assert_eq(load8(&v6 + 15), 4, "compat byte 15 = 4");
+
+    # 2001:db8::1.2.3.4 → 2001 0db8 0000 0000 0000 0000 0102 0304
+    assert_eq(ipv6_parse("2001:db8::1.2.3.4", &v6), 0, "2001:db8::1.2.3.4 parses");
+    assert_eq(load8(&v6 + 0),  0x20, "byte 0 = 20");
+    assert_eq(load8(&v6 + 3),  0xB8, "byte 3 = b8");
+    assert_eq(load8(&v6 + 12), 1,    "byte 12 = 1");
+    assert_eq(load8(&v6 + 15), 4,    "byte 15 = 4");
+
+    # Full eight-group no-`::` form: 0:0:0:0:0:ffff:1.2.3.4
+    assert_eq(ipv6_parse("0:0:0:0:0:ffff:1.2.3.4", &v6), 0, "full-form mapped parses");
+    assert_eq(load8(&v6 + 10), 0xFF, "full byte 10 = ff");
+    assert_eq(load8(&v6 + 12), 1,    "full byte 12 = 1");
+    assert_eq(load8(&v6 + 15), 4,    "full byte 15 = 4");
+
+    # Rejects: bare dotted-quad (no preceding ':'), short / overlong quad.
+    assert(ipv6_parse("1.2.3.4",          &v6) < 0, "bare v4 rejected by ipv6");
+    assert(ipv6_parse("::ffff:1.2.3",     &v6) < 0, "short quad rejected");
+    assert(ipv6_parse("::ffff:1.2.3.4.5", &v6) < 0, "long quad rejected");
+    assert(ipv6_parse("::ffff:1.2.3.999", &v6) < 0, "octet > 255 rejected");
+
+    # ----- ipv6_parse_ex: scope-id suffix -----
+    test_group("ipv6_parse scope id");
+
+    var zb[16];
+
+    # No `%` → returns 0, address parses, scope buffer empty.
+    assert_eq(ipv6_parse_ex("::1", &v6, &zb, 16), 0, "no scope → 0");
+    assert_eq(load8(&zb), 0, "no scope → empty cstr");
+    assert_eq(load8(&v6 + 15), 1, "addr still parses");
+
+    # fe80::1%eth0 → returns 4 (len of "eth0"), zone copied.
+    assert_eq(ipv6_parse_ex("fe80::1%eth0", &v6, &zb, 16), 4, "eth0 zone = 4");
+    assert_eq(streq(&zb, "eth0"), 1, "zone cstr = eth0");
+    assert_eq(load8(&v6 + 0),  0xFE, "fe80 byte 0");
+    assert_eq(load8(&v6 + 1),  0x80, "fe80 byte 1");
+    assert_eq(load8(&v6 + 15), 1,    "fe80::1 tail");
+
+    # Longer zone name (truncation): cap=4 → "lo\0" fits; "wlan0" would
+    # truncate to "wla\0" when cap=4. Verify the cap-1 + NUL contract.
+    assert_eq(ipv6_parse_ex("::1%wlan0", &v6, &zb, 4), 5, "zone len returned even if truncated");
+    assert_eq(streq(&zb, "wla"), 1, "zone truncated to cap-1");
+
+    # `%` with empty zone → rejected.
+    assert(ipv6_parse_ex("fe80::1%", &v6, &zb, 16) < 0, "bare % rejected");
+
+    # `::ffff:1.2.3.4%lo` — v4-embedded + scope together.
+    assert_eq(ipv6_parse_ex("::ffff:1.2.3.4%lo", &v6, &zb, 16), 2, "mapped+zone parses");
+    assert_eq(streq(&zb, "lo"), 1, "zone = lo");
+    assert_eq(load8(&v6 + 10), 0xFF, "mapped byte 10");
+    assert_eq(load8(&v6 + 15), 4,    "mapped byte 15");
+
+    # null ptr → FAIL.
+    assert_eq(ipv6_parse_ex(0, &v6, &zb, 16), IPV6_PARSE_FAIL, "null → FAIL");
 
     # ----- cmsg TTL walk -----
     test_group("cmsg ttl walk");
@@ -915,6 +1010,17 @@ fn main() {
     # Empty control buffer → 0.
     var c6[8];
     assert_eq(_lx_cmsg_find_ttl(&c6, 0), 0, "empty control → 0");
+
+    # ----- ifindex resolver -----
+    test_group("platform resolve ifindex");
+
+    # `lo` always exists on Linux with ifindex=1. Asserts the path
+    # builder + /sys/class/net read + decimal parse all line up.
+    assert_eq(platform_resolve_ifindex("lo"), 1, "lo → 1");
+
+    # Unknown interface → 0 (open fails). Long random name to avoid
+    # collision with a real iface on developer boxes.
+    assert_eq(platform_resolve_ifindex("yo-nope-xyzzy-2026"), 0, "unknown → 0");
 
     return assert_summary();
 }

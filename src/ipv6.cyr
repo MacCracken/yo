@@ -2,15 +2,20 @@
 #
 # Strict parse of RFC 4291 dotted-colon form, packed into a caller-owned
 # 16-byte buffer in network byte order (group 0 high → out[0..1]).
-# Supports zero-group compression (`::` once per address) and case-
-# insensitive hex digits. Rejects scope-IDs (`fe80::1%eth0` — deferred
-# to a later 0.5.x point release) and IPv4-embedded textual form
-# (`::ffff:1.2.3.4` — defer to 0.5.1 when AAAA lookup also lands).
+# Supports zero-group compression (`::` once per address), case-
+# insensitive hex digits, IPv4-embedded textual form (`::ffff:1.2.3.4`,
+# `2001:db8::1.2.3.4`, full `0:0:0:0:0:ffff:1.2.3.4`), and scope-id
+# suffix (`fe80::1%eth0`).
 #
 # Output byte order matches the wire format expected by sockaddr_in6:
 # the kernel's sin6_addr is `struct in6_addr { uint8_t s6_addr[16]; }`
 # in network order. The Linux backend writes our 16 bytes directly into
 # offset 8 of the sockaddr.
+#
+# Scope-id surface: ipv6_parse_ex(s, out, scope_out, scope_cap) splits
+# the `%zone` suffix off into scope_out (a caller-owned cstr buffer)
+# and returns the zone length (0 if no `%`). `ipv6_parse(s, out)` is
+# the thin scope-id-rejecting wrapper for callers that don't care.
 
 var IPV6_PARSE_OK   = 0;
 var IPV6_PARSE_FAIL = 0 - 1;
@@ -30,11 +35,10 @@ fn _ipv6_put16_be(p, val): i64 {
     return 0;
 }
 
-# Parse the IPv6 literal pointed at by `s` into 16 packed bytes at `out`.
-# Returns 0 on success, IPV6_PARSE_FAIL on any rejection. `out` must be
-# at least 16 bytes. Out is not touched on failure (caller can probe
-# for fallthrough to the next resolver path without re-zeroing).
-fn ipv6_parse(s, out): i64 {
+# The core parse: pure colon-hex with optional `::`. No dotted-quad
+# tail, no scope-id. Returns OK/FAIL. Callers feed it a NUL-terminated
+# string of just the v6 address portion.
+fn _ipv6_parse_pure(s, out): i64 {
     if (s == 0) { return IPV6_PARSE_FAIL; }
 
     var groups[64];               # scratch: up to 8 i64 entries holding parsed groups
@@ -122,4 +126,131 @@ fn ipv6_parse(s, out): i64 {
     }
 
     return IPV6_PARSE_OK;
+}
+
+# Parse with dotted-quad tail support. Strategy: pre-scan for `.`.
+# When present, locate the last `:` before the first `.`; the
+# substring after that colon is the dotted-quad (4 octets), the
+# substring before+including that colon is the v6 prefix. Synthesize
+# `<prefix>0:0\0` to feed _ipv6_parse_pure, then overwrite the last
+# 4 bytes of out with the packed quad in network order. The
+# placeholder `:0:0` substitutes correctly because group counting is
+# preserved (two groups for the four octets), and the `::` expansion
+# math doesn't care which two trailing groups were written.
+#
+# A bare `1.2.3.4` (no `:` before the dot) is rejected so the v4
+# literal path in main.cyr can claim it instead.
+fn _ipv6_parse_with_v4(s, out): i64 {
+    var len = 0;
+    while (load8(s + len) != 0) { len = len + 1; }
+
+    var first_dot = 0 - 1;
+    var i = 0;
+    while (i < len) {
+        if (load8(s + i) == 46) { first_dot = i; break; }       # '.'
+        i = i + 1;
+    }
+    if (first_dot < 0) { return _ipv6_parse_pure(s, out); }
+
+    var sep = 0 - 1;
+    var j = first_dot;
+    while (j > 0) {
+        j = j - 1;
+        if (load8(s + j) == 58) { sep = j; break; }              # ':'
+    }
+    if (sep < 0) { return IPV6_PARSE_FAIL; }                     # bare dotted-quad
+
+    var quad = ipv4_parse(s + sep + 1);
+    if (quad < 0) { return IPV6_PARSE_FAIL; }
+
+    # Build "<prefix-through-sep>0:0\0" in a scratch buffer.
+    var scratch = alloc(sep + 5);
+    var k = 0;
+    while (k <= sep) { store8(scratch + k, load8(s + k)); k = k + 1; }
+    store8(scratch + sep + 1, 48);    # '0'
+    store8(scratch + sep + 2, 58);    # ':'
+    store8(scratch + sep + 3, 48);    # '0'
+    store8(scratch + sep + 4, 0);
+
+    if (_ipv6_parse_pure(scratch, out) != IPV6_PARSE_OK) { return IPV6_PARSE_FAIL; }
+
+    store8(out + 12, (quad >> 24) & 0xFF);
+    store8(out + 13, (quad >> 16) & 0xFF);
+    store8(out + 14, (quad >> 8)  & 0xFF);
+    store8(out + 15, quad & 0xFF);
+    return IPV6_PARSE_OK;
+}
+
+# Public: parse with optional scope-id suffix. The scope buffer is
+# filled with the zone name (NUL-terminated). Returns the zone-name
+# length (0 if no `%`) on success, IPV6_PARSE_FAIL on any rejection.
+# `scope_out` must hold at least scope_cap bytes; the zone is
+# truncated to scope_cap-1 + NUL. A `%` with empty zone is rejected.
+fn ipv6_parse_ex(s, out, scope_out, scope_cap): i64 {
+    if (s == 0) { return IPV6_PARSE_FAIL; }
+    if (scope_cap > 0) { store8(scope_out, 0); }
+
+    var len = 0;
+    while (load8(s + len) != 0) { len = len + 1; }
+
+    var pct = 0 - 1;
+    var i = 0;
+    while (i < len) {
+        if (load8(s + i) == 37) { pct = i; break; }              # '%'
+        i = i + 1;
+    }
+
+    if (pct < 0) {
+        if (_ipv6_parse_with_v4(s, out) != IPV6_PARSE_OK) { return IPV6_PARSE_FAIL; }
+        return 0;
+    }
+
+    var zone_len = len - pct - 1;
+    if (zone_len <= 0) { return IPV6_PARSE_FAIL; }               # bare `%`
+
+    # Copy the address half (s[0..pct]) into scratch so we can NUL-
+    # terminate it without mutating the caller's buffer.
+    var addr_scratch = alloc(pct + 1);
+    var a = 0;
+    while (a < pct) { store8(addr_scratch + a, load8(s + a)); a = a + 1; }
+    store8(addr_scratch + pct, 0);
+
+    if (_ipv6_parse_with_v4(addr_scratch, out) != IPV6_PARSE_OK) { return IPV6_PARSE_FAIL; }
+
+    # Copy zone into caller buffer, NUL-terminate (truncate if needed).
+    var copy = zone_len;
+    if (copy > scope_cap - 1) { copy = scope_cap - 1; }
+    var z = 0;
+    while (z < copy) { store8(scope_out + z, load8(s + pct + 1 + z)); z = z + 1; }
+    store8(scope_out + copy, 0);
+    return zone_len;
+}
+
+# True (1) when addr16 is in `::ffff:0:0/96` — i.e., bytes [0..10] are
+# zero and bytes [10..11] are 0xff 0xff. These addresses (RFC 4291
+# §2.5.5.2) are IPv4 endpoints under a v6 textual disguise; the v6
+# socket path can't reach them, so main.cyr routes them through the
+# IPv4 dispatch instead.
+fn ipv6_is_v4_mapped(addr16): i64 {
+    var i = 0;
+    while (i < 10) {
+        if (load8(addr16 + i) != 0) { return 0; }
+        i = i + 1;
+    }
+    if (load8(addr16 + 10) != 0xFF) { return 0; }
+    if (load8(addr16 + 11) != 0xFF) { return 0; }
+    return 1;
+}
+
+# Parse the IPv6 literal pointed at by `s` into 16 packed bytes at `out`.
+# Rejects scope-id suffix — use ipv6_parse_ex when scope-ids matter.
+# Returns IPV6_PARSE_OK / IPV6_PARSE_FAIL. `out` must be ≥ 16 bytes.
+fn ipv6_parse(s, out): i64 {
+    if (s == 0) { return IPV6_PARSE_FAIL; }
+    var i = 0;
+    while (load8(s + i) != 0) {
+        if (load8(s + i) == 37) { return IPV6_PARSE_FAIL; }      # '%' → use _ex
+        i = i + 1;
+    }
+    return _ipv6_parse_with_v4(s, out);
 }

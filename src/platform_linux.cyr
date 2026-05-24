@@ -216,14 +216,18 @@ fn platform_udp_recv(fd, buf, maxlen): i64 {
 #   off 2-3:   sin6_port     (u16 BE)
 #   off 4-7:   sin6_flowinfo (u32, zero)
 #   off 8-23:  sin6_addr     (16 bytes)
-#   off 24-27: sin6_scope_id (u32, zero — link-local scope deferred)
-fn _lx_sockaddr_in6(addr16, port): i64 {
+#   off 24-27: sin6_scope_id (u32, host order — kernel reads as native)
+#
+# scope_id is the interface index for link-local destinations (RFC 4007).
+# 0 means "no zone" — global / loopback addresses don't need one.
+fn _lx_sockaddr_in6(addr16, port, scope_id): i64 {
     var sa = alloc(28);
     memset(sa, 0, 28);
     store16(sa, _LX_AF_INET6);
     store8(sa + 2, (port >> 8) & 0xFF);
     store8(sa + 3, port & 0xFF);
     memcpy(sa + 8, addr16, 16);
+    store32(sa + 24, scope_id);
     return sa;
 }
 
@@ -264,9 +268,11 @@ fn platform_icmp6_open(): i64 {
 }
 
 # sendto over ICMPv6. addr16 is the packed 16-byte IPv6 destination
-# (network order, from ipv6_parse). Returns bytes sent or negative errno.
-fn platform_icmp6_send_to(fd, addr16, pkt, pkt_len): i64 {
-    var sa = _lx_sockaddr_in6(addr16, 0);
+# (network order, from ipv6_parse). scope_id is the ifindex for
+# link-local destinations (0 for global / loopback). Returns bytes
+# sent or negative errno.
+fn platform_icmp6_send_to(fd, addr16, scope_id, pkt, pkt_len): i64 {
+    var sa = _lx_sockaddr_in6(addr16, 0, scope_id);
     return syscall(_LX_SYS_SENDTO, fd, pkt, pkt_len, 0, sa, 28);
 }
 
@@ -326,6 +332,49 @@ fn platform_read_file(path, buf, maxlen): i64 {
     var n = syscall(_LX_SYS_READ, fd, buf, maxlen);
     syscall(_LX_SYS_CLOSE, fd);
     return n;
+}
+
+# Resolve an interface name (e.g., "lo", "eth0") to its kernel ifindex
+# by reading /sys/class/net/<name>/ifindex (decimal ASCII, trailing
+# newline). Returns the ifindex (≥1) on success, 0 on any failure.
+# Used to fill sin6_scope_id for link-local IPv6 destinations.
+fn _lx_resolve_ifindex(name): i64 {
+    var nlen = strlen(name);
+    var pre  = "/sys/class/net/";
+    var suf  = "/ifindex";
+    var prelen = strlen(pre);
+    var suflen = strlen(suf);
+    var pathcap = prelen + nlen + suflen + 1;
+    if (pathcap > 256) { return 0; }
+    var path = alloc(pathcap);
+    var i = 0;
+    while (i < prelen) { store8(path + i, load8(pre + i)); i = i + 1; }
+    var j = 0;
+    while (j < nlen)   { store8(path + prelen + j, load8(name + j)); j = j + 1; }
+    var k = 0;
+    while (k < suflen) { store8(path + prelen + nlen + k, load8(suf + k)); k = k + 1; }
+    store8(path + prelen + nlen + suflen, 0);
+
+    var buf = alloc(32);
+    var n = platform_read_file(path, buf, 31);
+    if (n <= 0) { return 0; }
+
+    # Parse decimal ASCII until non-digit (typically '\n' or NUL).
+    var idx = 0;
+    var p = 0;
+    while (p < n) {
+        var c = load8(buf + p);
+        if ((c < 48) || (c > 57)) { break; }
+        idx = idx * 10 + (c - 48);
+        p = p + 1;
+    }
+    if (p == 0) { return 0; }
+    return idx;
+}
+
+# Public wrapper — keeps main.cyr off the _LX_ namespace.
+fn platform_resolve_ifindex(name): i64 {
+    return _lx_resolve_ifindex(name);
 }
 
 # Read CLOCK_MONOTONIC and return microseconds since boot.

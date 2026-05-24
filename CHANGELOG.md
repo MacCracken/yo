@@ -4,6 +4,28 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.2] — 2026-05-23
+
+IPv6 tail items from 0.5.1. Scope IDs (`fe80::1%eth0`) for link-local probing and the IPv4-embedded textual form (`::ffff:1.2.3.4`, `2001:db8::1.2.3.4`, `0:0:0:0:0:ffff:1.2.3.4`) for the parser and the RFC 5952 §5 output formatter. v4-mapped destinations dispatch through the IPv4 socket path because ICMPv6 can't carry a v4 probe.
+
+### Added
+- `src/ipv6.cyr` — `_ipv6_parse_pure` (the prior body, factored), `_ipv6_parse_with_v4` (pre-scans for `.`, splits at the last `:` before the first dot, parses the dotted-quad via `ipv4_parse`, then synthesizes `<prefix>0:0` and feeds the pure parser, finally overwriting the trailing 4 bytes), `ipv6_parse_ex(s, out, scope_out, scope_cap)` (splits off the `%zone` suffix into a caller-owned cstr buffer, returns the zone length), `ipv6_is_v4_mapped(addr16)` (predicate for the mapped `::ffff:0:0/96` block). `ipv6_parse` keeps its old contract (no `%`, returns OK/FAIL) by forwarding to `_ipv6_parse_with_v4` after a `%`-presence check.
+- `src/platform_linux.cyr` — `_lx_sockaddr_in6` gained a `scope_id` parameter (writes sin6_scope_id at offset 24). `platform_icmp6_send_to` plumbs the scope id through. `_lx_resolve_ifindex(name)` reads `/sys/class/net/<name>/ifindex` via `platform_read_file` and parses the decimal payload. `platform_resolve_ifindex(name)` is the public wrapper used from main.
+- `src/probe.cyr` — `probe_run` signature: `scope_id` inserted after `addr_arg`; threaded into the v6 send path.
+- `src/main.cyr` — literal-v6 branch uses `ipv6_parse_ex`; on `%zone` it resolves the ifindex and aborts the target with `yo: unknown interface: <name>` + exit 2 when the resolve fails. v4-mapped addresses (`ipv6_is_v4_mapped`) collapse to the v4 dispatch with the embedded octets repacked as a u32. Banner preserves whatever the user typed (`::ffff:127.0.0.1`, `fe80::1%lo`) because the original `target` cstr is passed straight through.
+- `src/output.cyr` — `_output_is_v4_mapped` predicate; `output_ipv6_to_buf` short-circuits v4-mapped addresses to `::ffff:a.b.c.d` form per RFC 5952 §5. IPv4-compatible (`::a.b.c.d`, deprecated) keeps plain hex.
+- `tests/yo.tcyr` — 67 new assertions (365 total). New groups: `ipv6_parse embedded v4` (15 — happy paths for `::ffff:1.2.3.4`, `::1.2.3.4`, `2001:db8::1.2.3.4`, full no-`::` form; rejects for bare quad, short quad, long quad, octet > 255), `ipv6_parse scope id` (12 — no-scope, `eth0`, truncation contract, bare `%` rejected, mapped+zone composite, null-ptr), `platform resolve ifindex` (2 — `lo`→1 and unknown→0). `output ipv6_to_buf` extended by 6 (v4-mapped 127.0.0.1, max-octet mapped, v4-compat stays plain). Two prior rejection lines (`::ffff:1.2.3.4` and `fe80::1%eth0`) updated to match the new contract — only the bare `ipv6_parse` rejects `%`; the `_ex` variant accepts it.
+
+### Iron-verified
+- `yo ::ffff:127.0.0.1` → banner `::ffff:127.0.0.1 (localhost)`, two replies via ICMPv4 socket, ttl=64, ~0.03 ms.
+- `yo ::1%lo` → banner `::1%lo (localhost)`, two replies via ICMPv6, ttl=64.
+- `yo fe80::b241:6fff:fe0c:e425%enp1s0` → real link-local probe of the host's own enp1s0 address; PTR resolves to `archaemenid8`; ~0.03 ms.
+- `yo ::1%nope` → `yo: unknown interface: nope`, exit 2.
+- `yo -q 127.0.0.1 ::1%lo ::ffff:127.0.0.1` → mixed v4 / link-local v6 / v4-mapped multi-target; all replies received; exit 0.
+
+### Deferred
+- Nothing from the 0.5.x band remains. Next milestone: 0.6.x AGNOS backend, still blocked on the kernel ICMP surface (r8169 RX-path 5-part bundle iron-validating, Attempt 97 pending in agnos).
+
 ## [0.5.1] — 2026-05-23
 
 IPv6 polish. AAAA DNS lookup, `ip6.arpa` PTR reverse-DNS, `-4` / `-6` family-forcing flags, and a canonical RFC 5952 v6-address formatter for banners. `yo dns.google` still defaults to IPv4 (POSIX expectation); `yo -6 dns.google` does the AAAA route. Closes the headline gaps from 0.5.0; scope IDs and IPv4-embedded form remain deferred.

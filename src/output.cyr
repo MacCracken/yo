@@ -79,13 +79,45 @@ fn _output_u16_hex_to_buf(val, buf): i64 {
     return n;
 }
 
+# Detect IPv4-mapped form (`::ffff:a.b.c.d`, RFC 4291 §2.5.5.2):
+# first 10 bytes zero, bytes 10-11 = 0xffff. Pure-`::` and v4-compat
+# (`::a.b.c.d`, deprecated) are NOT mapped — they keep the plain
+# hex form per RFC 5952 §5.
+fn _output_is_v4_mapped(addr16): i64 {
+    var i = 0;
+    while (i < 10) {
+        if (load8(addr16 + i) != 0) { return 0; }
+        i = i + 1;
+    }
+    if (load8(addr16 + 10) != 0xFF) { return 0; }
+    if (load8(addr16 + 11) != 0xFF) { return 0; }
+    return 1;
+}
+
 # Render a 16-byte IPv6 address (network order, as produced by
 # ipv6_parse / dns_resolve_aaaa) into buf as an RFC 5952 canonical
 # cstring: lowercase, no leading zeros in groups, longest run of two
-# or more zero groups compressed to `::`. Buf must hold ≥ 40 bytes
-# (max plain form `ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff` = 39 + NUL).
+# or more zero groups compressed to `::`. IPv4-mapped addresses
+# (`::ffff:0:0/96`) are rendered with the embedded dotted-quad per
+# RFC 5952 §5. Buf must hold ≥ 46 bytes (worst case
+# `::ffff:255.255.255.255` = 22, plain form 39, + NUL).
 # Returns bytes written, not counting NUL.
 fn output_ipv6_to_buf(addr16, buf): i64 {
+    if (_output_is_v4_mapped(addr16) == 1) {
+        store8(buf + 0, 58); store8(buf + 1, 58);                # "::"
+        store8(buf + 2, 102); store8(buf + 3, 102);              # "ff"
+        store8(buf + 4, 102); store8(buf + 5, 102);              # "ff"
+        store8(buf + 6, 58);                                      # ":"
+        # Bytes 12..15 are the embedded v4. output_ipv4_to_buf takes
+        # a packed u32 with the first octet in the high byte; rebuild.
+        var packed = (load8(addr16 + 12) << 24)
+                   | (load8(addr16 + 13) << 16)
+                   | (load8(addr16 + 14) << 8)
+                   |  load8(addr16 + 15);
+        var dq = output_ipv4_to_buf(packed, buf + 7);
+        return 7 + dq;
+    }
+
     # Expand to 8 groups (i64 entries) by reading big-endian pairs.
     var groups[64];
     var i = 0;
