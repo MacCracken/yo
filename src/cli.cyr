@@ -95,9 +95,19 @@ fn cli_target(reg): i64 {
     return flags_positional(_cli_reg_ctx(reg), 0);
 }
 
+# Number of positional target hosts.
+fn cli_target_count(reg): i64 {
+    return flags_positional_count(_cli_reg_ctx(reg));
+}
+
+# i-th target host (0-indexed). Returns 0 if out of range.
+fn cli_target_at(reg, idx): i64 {
+    return flags_positional(_cli_reg_ctx(reg), idx);
+}
+
 # Print "Usage: ..." line to the given fd (1 stdout, 2 stderr).
 fn cli_print_usage(fd): i64 {
-    var u = "Usage: yo [-c count] [-W timeout_ms] [-i interval_ms] [-s size] [-q|-v] [-n] <host>\n";
+    var u = "Usage: yo [-c count] [-W timeout_ms] [-i interval_ms] [-s size] [-q|-v] [-n] <host> [host ...]\n";
     syscall(1, fd, u, strlen(u));
     return 0;
 }

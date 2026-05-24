@@ -4,6 +4,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.2] — 2026-05-23
+
+Multiple targets. `yo router 8.8.8.8 1.1.1.1` now runs sequential per-target probes with a combined exit code — third item in the 0.4.x band.
+
+### Added
+- `src/main.cyr` — wraps the resolve + `probe_run` block in a loop over `cli_target_count(reg)`. Each target is independently resolved (forward DNS for hostnames, reverse DNS for literal IPs unless `-n`), probed with the same per-target settings (`-c`, `-W`, `-i`, `-s`), and gets its own banner+summary block separated by a blank line in non-quiet mode. Aggregate exit code: `0` if any target received at least one reply, `2` if no replies and any target hit a resolve/socket error, `1` otherwise.
+- `src/cli.cyr` — `cli_target_count(reg)` and `cli_target_at(reg, idx)` accessors. `cli_target(reg)` retained as the singular accessor (returns the first positional). Usage line updated to `<host> [host ...]`.
+- `tests/yo.tcyr` — 12 new assertions (181 total) covering multi-positional parse (3 targets, flag interleave, single-target count=1) and the new accessors.
+
+### Behavior
+- Unresolvable hosts in a multi-target list no longer abort the run — yo prints `yo: cannot resolve host: <name>` to stderr and proceeds to the next target. Process exit code still reflects the failure (2) unless another target succeeded (0).
+
 ## [0.4.1] — 2026-05-23
 
 Reverse DNS. `yo 8.8.8.8` now banners as `yo 8.8.8.8 (dns.google) — 56 bytes` — the symmetric completion of the 0.4.0 forward-DNS work. Second item in the 0.4.x band.

@@ -2,7 +2,7 @@
 
 > **⚠ NOT A LOG.** Live state with pointers — current truth only. Per-release history → [`../../CHANGELOG.md`](../../CHANGELOG.md). Milestone path → [`roadmap.md`](roadmap.md).
 >
-> **Last refresh**: 2026-05-23 (0.4.1 cut — reverse DNS).
+> **Last refresh**: 2026-05-23 (0.4.2 cut — multiple targets).
 
 ---
 
@@ -10,18 +10,24 @@
 
 | Field | Value |
 |---|---|
-| Current version | **0.4.1** — reverse DNS + `-n` flag (second 0.4.x item) |
-| Status | **Linux MVP + DNS (both directions) working** — `yo google.com` and `yo 8.8.8.8` both produce a banner with the symmetric form. AGNOS backend pending kernel surface. |
-| Build size | ~96 KB (Linux MVP + DNS forward+reverse, pre-DCE; 286 unreachable fns in main, 304 in tests) |
+| Current version | **0.4.2** — multiple targets (third 0.4.x item) |
+| Status | **Linux MVP + DNS + multi-target working** — `yo router 8.8.8.8 1.1.1.1` runs sequential per-target probes with a combined exit code. AGNOS backend pending kernel surface. |
+| Build size | ~96 KB (Linux MVP + DNS forward+reverse + multi-target, pre-DCE; 286 unreachable fns in main, 304 in tests) |
 | Cyrius pin | 6.0.1 |
-| Tests | 169 assertions in `tests/yo.tcyr` — ICMP framing/checksum + CLI parse (incl. `-n`) + IPv4 parse + RTT stats + output format + DNS forward+reverse (qname encoders, query builders, response parsers for A and PTR, name decoder w/ pointer guard, resolv.conf parser) |
+| Tests | 181 assertions in `tests/yo.tcyr` — ICMP framing/checksum + CLI parse (incl. `-n`, multi-target) + IPv4 parse + RTT stats + output format + DNS forward+reverse (qname encoders, query builders, response parsers for A and PTR, name decoder w/ pointer guard, resolv.conf parser) |
 | Iron-validation host | archaemenid (Beelink SER, AMD) — same machine as the agnosticos iron-burn surface |
 | Family position | First entry in network-tools family |
 | Backends | Linux (working) · AGNOS (planned) · Windows/Apple (post-1.0) |
 
 ## In-flight work
 
-**0.4.1 reverse DNS landed** — `yo 8.8.8.8` → `yo 8.8.8.8 (dns.google) — 56 bytes ...`. PTR query against `D.C.B.A.in-addr.arpa.` with a shorter 1 s timeout / 1 attempt (most IPs NXDOMAIN; long timeouts would drag probe start). `-n` / `--numeric` flag suppresses the lookup. Modules added since 0.4.0:
+**0.4.2 multiple targets landed** — `yo router 8.8.8.8 1.1.1.1` runs each target sequentially with its own banner + summary block, separated by a blank line (non-quiet mode). Unresolvable hosts in the list no longer abort the run; stderr emits `yo: cannot resolve host: <name>` and the loop continues. Aggregate exit code: `0` if any target had any reply, `2` if no replies and any target hit a resolve/socket error, `1` otherwise. Modules touched since 0.4.1:
+
+- `src/main.cyr` — the resolve + `probe_run` block is now wrapped in `while (i < cli_target_count(reg))`. Tracks `any_reply` / `any_error` flags to compose the final exit code. Reuses a single `parens_buf` across iterations; the DNS path overwrites in place.
+- `src/cli.cyr` — added `cli_target_count(reg)` and `cli_target_at(reg, idx)`. Usage line updated to `<host> [host ...]`. Registry layout unchanged (72 B).
+- `tests/yo.tcyr` — `cli multiple targets` group: 12 assertions over 3 fixtures (three targets, flag-interleaved, single-target).
+
+**0.4.1 reverse DNS** (carryover) — `yo 8.8.8.8` → `yo 8.8.8.8 (dns.google) — 56 bytes ...`. PTR query against `D.C.B.A.in-addr.arpa.` with a shorter 1 s timeout / 1 attempt (most IPs NXDOMAIN; long timeouts would drag probe start). `-n` / `--numeric` flag suppresses the lookup. Modules from 0.4.1:
 
 - `src/dns.cyr` — new helpers: `_dns_build_reverse_qname` (octets least-significant-first per RFC 1035 §3.5), `_dns_build_ptr_query`, `_dns_decode_name` (compressed-pointer-aware, 16-jump loop guard), `_dns_parse_ptr_response`. Shared `_dns_walk_to_type` factored out — forward and reverse parsers now share header validation + answer walking.
 - `src/cli.cyr` — `-n` / `--numeric` flag; registry grew 64 B → 72 B.
@@ -41,7 +47,7 @@
 - `src/ipv4.cyr` — strict dotted-quad parser. Matches `agnos/kernel/core/net.cyr:21` `ip4()` packing.
 - `src/stats.cyr` + `src/output.cyr` — RTT accumulator + README-shaped output.
 
-Next milestones in the **0.4.x band**: multiple targets (sequential probe runs with combined exit), TTL/hop-limit display (cmsg via `IP_RECVTTL` on SOCK_DGRAM). Both Linux-backend work; no platform-layer changes needed. See [`roadmap.md`](roadmap.md) for the full path to 1.0.
+Next milestone in the **0.4.x band**: TTL/hop-limit display (cmsg via `IP_RECVTTL` on SOCK_DGRAM, requires switching `platform_icmp_recv` from `recvfrom` to `recvmsg` to carry the ancillary data). Linux-backend work; the AGNOS backend will need an equivalent surface but doesn't block the Linux ship. After that, **0.5.x IPv6**. See [`roadmap.md`](roadmap.md) for the full path to 1.0.
 
 Pending later:
 - **AGNOS backend** (`src/platform_agnos.cyr`) — pending the kernel ICMP surface in agnos (blocked on r8169 RX-path 5-part bundle iron-validating, Attempt 97 pending). Slots in as a sibling to `platform_linux.cyr` with no changes to `probe.cyr`. Will also need a sovereign UDP surface for the AGNOS-side `dns_resolve`.

@@ -563,6 +563,33 @@ fn main() {
     cli_parse_argv(reg_nd, 2, av_nd);
     assert_eq(cli_numeric(reg_nd), 0, "numeric off by default");
 
+    # ----- CLI: multiple targets -----
+    test_group("cli multiple targets");
+
+    var reg_m1 = cli_new();
+    var av_m1 = _mk_argv("yo", "router", "8.8.8.8", "1.1.1.1", 0, 0, 0, 0);
+    assert_eq(cli_parse_argv(reg_m1, 4, av_m1), CLI_OK, "three targets parse");
+    assert_eq(cli_target_count(reg_m1), 3, "target_count = 3");
+    assert_eq(streq(cli_target_at(reg_m1, 0), "router"),  1, "target[0] = router");
+    assert_eq(streq(cli_target_at(reg_m1, 1), "8.8.8.8"), 1, "target[1] = 8.8.8.8");
+    assert_eq(streq(cli_target_at(reg_m1, 2), "1.1.1.1"), 1, "target[2] = 1.1.1.1");
+    assert_eq(streq(cli_target(reg_m1), "router"), 1, "cli_target == target_at(0)");
+
+    # Flags interleaved with targets still collect targets in argv order
+    var reg_m2 = cli_new();
+    var av_m2 = _mk_argv("yo", "-c", "2", "a.host", "b.host", 0, 0, 0);
+    assert_eq(cli_parse_argv(reg_m2, 5, av_m2), CLI_OK, "flag + two targets parse");
+    assert_eq(cli_count(reg_m2), 2, "-c 2 applied");
+    assert_eq(cli_target_count(reg_m2), 2, "two targets captured");
+    assert_eq(streq(cli_target_at(reg_m2, 0), "a.host"), 1, "target[0] = a.host");
+    assert_eq(streq(cli_target_at(reg_m2, 1), "b.host"), 1, "target[1] = b.host");
+
+    # Single target still reports count=1
+    var reg_m3 = cli_new();
+    var av_m3 = _mk_argv("yo", "only.host", 0, 0, 0, 0, 0, 0);
+    cli_parse_argv(reg_m3, 2, av_m3);
+    assert_eq(cli_target_count(reg_m3), 1, "single target → count=1");
+
     return assert_summary();
 }
 
