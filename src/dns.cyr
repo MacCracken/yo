@@ -1,0 +1,274 @@
+# dns.cyr — minimal recursive-query DNS resolver (A records only).
+#
+# Self-contained: parses /etc/resolv.conf for a nameserver, sends a
+# single RFC 1035 query over UDP, parses the response to extract the
+# first A record. Does NOT pull in lib/net.cyr — uses platform_udp_*
+# directly per the per-backend sovereignty rule (Linux backend today;
+# AGNOS backend will offer its own dns_resolve via sovereign UDP
+# primitives later).
+#
+# Scope: A records only (IPv4). AAAA arrives in 0.5.x with IPv6.
+# No /etc/hosts fallback yet — pure DNS query path. No DNSSEC, no
+# EDNS0. taar extraction waits for a second consumer (dig).
+#
+# Wire layout (RFC 1035 §4.1, big-endian throughout):
+#   Header (12 B):
+#     off 0-1:  ID            matches reply
+#     off 2:    QR(1) OP(4) AA(1) TC(1) RD(1)
+#     off 3:    RA(1) Z(3) RCODE(4)
+#     off 4-5:  QDCOUNT
+#     off 6-7:  ANCOUNT
+#     off 8-9:  NSCOUNT
+#     off 10-11: ARCOUNT
+#   Question:
+#     QNAME: length-prefixed labels, terminated by 0x00
+#     QTYPE (2), QCLASS (2)
+#   Answer (×ANCOUNT):
+#     NAME (compressed or labels), TYPE (2), CLASS (2), TTL (4),
+#     RDLENGTH (2), RDATA (RDLENGTH bytes — 4 bytes for type A).
+
+var DNS_FAIL          = 0 - 1;
+var DNS_PORT          = 53;
+var DNS_HEADER_LEN    = 12;
+var DNS_TYPE_A        = 1;
+var DNS_CLASS_IN      = 1;
+var DNS_FALLBACK_NS   = 0x01010101;   # 1.1.1.1 — when /etc/resolv.conf is missing/empty.
+var DNS_TIMEOUT_MS    = 2000;
+var DNS_MAX_ATTEMPTS  = 2;
+var DNS_MAX_MSG       = 512;          # classic non-EDNS DNS message size.
+var DNS_MAX_LABEL     = 63;
+var DNS_RESOLV_CONF   = "/etc/resolv.conf";
+
+# Byte-by-byte equality. n-byte buffers, no NUL terminator required.
+fn _dns_bytes_eq(a, b, n): i64 {
+    var i = 0;
+    while (i < n) {
+        if (load8(a + i) != load8(b + i)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# Encode a hostname into DNS QNAME wire form:
+#   "google.com" → 06 67 6f 6f 67 6c 65 03 63 6f 6d 00   (13 bytes)
+# Trailing dot ("google.com.") is accepted as the same canonical form.
+# Returns bytes written; DNS_FAIL on empty hostname, empty label
+# ("foo..bar", ".foo"), or label > 63 bytes.
+fn _dns_encode_qname(host, buf): i64 {
+    var bi = 0;
+    var hi = 0;
+    while (1) {
+        var c = load8(host + hi);
+        if (c == 0) {
+            if (bi == 0) { return DNS_FAIL; }
+            store8(buf + bi, 0);
+            return bi + 1;
+        }
+        var lenslot = bi;
+        bi = bi + 1;
+        var ll = 0;
+        while (1) {
+            if (c == 0) { break; }
+            if (c == 46) { break; }                 # '.'
+            if (ll >= DNS_MAX_LABEL) { return DNS_FAIL; }
+            store8(buf + bi, c);
+            bi = bi + 1;
+            ll = ll + 1;
+            hi = hi + 1;
+            c = load8(host + hi);
+        }
+        if (ll == 0) { return DNS_FAIL; }
+        store8(buf + lenslot, ll);
+        if (c == 46) { hi = hi + 1; }
+    }
+    return DNS_FAIL;
+}
+
+# Build a full DNS query for host's A record. Caller-owned buf must
+# hold at least 12 + qname_len + 4 bytes (worst case ~270 B). Returns
+# bytes written, or DNS_FAIL if the qname doesn't encode.
+fn _dns_build_query(buf, qid, host): i64 {
+    store8(buf,     (qid >> 8) & 0xFF);
+    store8(buf + 1, qid & 0xFF);
+    store8(buf + 2, 0x01);                      # flags hi: RD=1
+    store8(buf + 3, 0x00);                      # flags lo: zero
+    store8(buf + 4, 0); store8(buf + 5, 1);     # QDCOUNT = 1
+    store8(buf + 6, 0); store8(buf + 7, 0);     # ANCOUNT = 0
+    store8(buf + 8, 0); store8(buf + 9, 0);     # NSCOUNT = 0
+    store8(buf + 10, 0); store8(buf + 11, 0);   # ARCOUNT = 0
+    var qn = _dns_encode_qname(host, buf + DNS_HEADER_LEN);
+    if (qn < 0) { return DNS_FAIL; }
+    var off = DNS_HEADER_LEN + qn;
+    store8(buf + off,     0); store8(buf + off + 1, DNS_TYPE_A);
+    store8(buf + off + 2, 0); store8(buf + off + 3, DNS_CLASS_IN);
+    return off + 4;
+}
+
+# Skip a (possibly-compressed) RFC 1035 name starting at buf+off.
+# Returns the offset just past the name, or DNS_FAIL on malformed
+# input. Compression: a length byte with the top two bits set (0xC0)
+# is a 2-byte pointer; otherwise it's a label length followed by that
+# many label bytes. We only skip — never decode — so pointer chasing
+# isn't needed.
+fn _dns_skip_name(buf, len, off): i64 {
+    while (off < len) {
+        var n = load8(buf + off);
+        if (n == 0) { return off + 1; }
+        if ((n & 0xC0) == 0xC0) {
+            if (off + 2 > len) { return DNS_FAIL; }
+            return off + 2;
+        }
+        if (n > 63) { return DNS_FAIL; }
+        off = off + 1 + n;
+    }
+    return DNS_FAIL;
+}
+
+# Parse a DNS response. Returns the first A-record's packed IPv4 on
+# success, DNS_FAIL on any error (truncated buffer, non-zero RCODE, no
+# A record found, ID mismatch). CNAMEs are skipped — most resolvers
+# follow CNAMEs and return the final A record in the same answer
+# section, which is the record we want.
+fn _dns_parse_response(buf, len, expected_qid): i64 {
+    if (len < DNS_HEADER_LEN) { return DNS_FAIL; }
+    var qid = (load8(buf) << 8) | load8(buf + 1);
+    if (qid != expected_qid) { return DNS_FAIL; }
+    var flags_hi = load8(buf + 2);
+    var flags_lo = load8(buf + 3);
+    if ((flags_hi & 0x80) == 0) { return DNS_FAIL; }    # not a response
+    if ((flags_lo & 0x0F) != 0) { return DNS_FAIL; }    # non-zero RCODE
+    var qdcount = (load8(buf + 4) << 8) | load8(buf + 5);
+    var ancount = (load8(buf + 6) << 8) | load8(buf + 7);
+    if (ancount == 0) { return DNS_FAIL; }
+
+    var off = DNS_HEADER_LEN;
+    var q = 0;
+    while (q < qdcount) {
+        off = _dns_skip_name(buf, len, off);
+        if (off < 0) { return DNS_FAIL; }
+        off = off + 4;                                  # QTYPE(2) + QCLASS(2)
+        if (off > len) { return DNS_FAIL; }
+        q = q + 1;
+    }
+
+    var a = 0;
+    while (a < ancount) {
+        off = _dns_skip_name(buf, len, off);
+        if (off < 0) { return DNS_FAIL; }
+        if (off + 10 > len) { return DNS_FAIL; }
+        var rtype = (load8(buf + off) << 8) | load8(buf + off + 1);
+        var rdlen = (load8(buf + off + 8) << 8) | load8(buf + off + 9);
+        off = off + 10;
+        if (off + rdlen > len) { return DNS_FAIL; }
+        if (rtype == DNS_TYPE_A) {
+            if (rdlen != 4) { return DNS_FAIL; }
+            return (load8(buf + off) << 24) | (load8(buf + off + 1) << 16) | (load8(buf + off + 2) << 8) | load8(buf + off + 3);
+        }
+        off = off + rdlen;
+        a = a + 1;
+    }
+    return DNS_FAIL;
+}
+
+# Parse /etc/resolv.conf-shaped text and return the first IPv4
+# nameserver's packed address. Returns DNS_FAIL if no parseable line.
+# Accepts:
+#   nameserver 1.2.3.4
+#   nameserver\t8.8.8.8     # trailing comment ok
+# Skips:
+#   # ... (comment lines)
+#   nameserver fe80::1      (IPv6 — not yet supported here)
+fn _dns_resolv_conf_nameserver(buf, len): i64 {
+    var i = 0;
+    while (i < len) {
+        var le = i;
+        while (le < len) {
+            if (load8(buf + le) == 10) { break; }       # '\n'
+            le = le + 1;
+        }
+        var p = i;
+        while (p < le) {
+            var c = load8(buf + p);
+            if (c != 32) { if (c != 9) { break; } }
+            p = p + 1;
+        }
+        if (p < le) {
+            if (load8(buf + p) != 35) {                 # not '#'
+                if (le - p >= 11) {
+                    if (_dns_bytes_eq(buf + p, "nameserver", 10) == 1) {
+                        var sep = load8(buf + p + 10);
+                        if ((sep == 32) || (sep == 9)) {
+                            p = p + 10;
+                            while (p < le) {
+                                var c2 = load8(buf + p);
+                                if (c2 != 32) { if (c2 != 9) { break; } }
+                                p = p + 1;
+                            }
+                            var ip_start = p;
+                            while (p < le) {
+                                var c3 = load8(buf + p);
+                                if ((c3 == 32) || (c3 == 9) || (c3 == 35)) { break; }
+                                p = p + 1;
+                            }
+                            var n = p - ip_start;
+                            if (n > 0) {
+                                var ipbuf = alloc(n + 1);
+                                memcpy(ipbuf, buf + ip_start, n);
+                                store8(ipbuf + n, 0);
+                                var addr = ipv4_parse(ipbuf);
+                                if (addr >= 0) { return addr; }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i = le + 1;
+    }
+    return DNS_FAIL;
+}
+
+# Pick a nameserver: first try /etc/resolv.conf; fall back to
+# DNS_FALLBACK_NS (1.1.1.1) so `yo google.com` works on misconfigured
+# hosts. Returns packed IPv4.
+fn _dns_choose_nameserver(): i64 {
+    var rc = alloc(4096);
+    var n = platform_read_file(DNS_RESOLV_CONF, rc, 4096);
+    if (n > 0) {
+        var ns = _dns_resolv_conf_nameserver(rc, n);
+        if (ns >= 0) { return ns; }
+    }
+    return DNS_FALLBACK_NS;
+}
+
+# Resolve a hostname to a packed IPv4 via DNS. Returns DNS_FAIL on
+# failure (timeout × DNS_MAX_ATTEMPTS, malformed response, NXDOMAIN,
+# no A record). The QID is derived from CLOCK_MONOTONIC microseconds
+# — sufficient to bind reply to query on a per-process basis.
+fn dns_resolve(host): i64 {
+    var ns = _dns_choose_nameserver();
+    var fd = platform_udp_open();
+    if (fd < 0) { return DNS_FAIL; }
+    platform_set_recv_timeout_ms(fd, DNS_TIMEOUT_MS);
+
+    var query = alloc(DNS_MAX_MSG);
+    var qid = platform_now_us() & 0xFFFF;
+    var qlen = _dns_build_query(query, qid, host);
+    if (qlen < 0) { platform_close(fd); return DNS_FAIL; }
+
+    var resp = alloc(DNS_MAX_MSG);
+    var attempt = 0;
+    while (attempt < DNS_MAX_ATTEMPTS) {
+        var sent = platform_udp_send_to(fd, ns, DNS_PORT, query, qlen);
+        if (sent > 0) {
+            var n = platform_udp_recv(fd, resp, DNS_MAX_MSG);
+            if (n > 0) {
+                var addr = _dns_parse_response(resp, n, qid);
+                if (addr >= 0) { platform_close(fd); return addr; }
+            }
+        }
+        attempt = attempt + 1;
+    }
+    platform_close(fd);
+    return DNS_FAIL;
+}

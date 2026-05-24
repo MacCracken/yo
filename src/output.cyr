@@ -38,10 +38,31 @@ fn _output_print_us_as_ms(us): i64 {
 
 fn _output_puts(s): i64 { syscall(1, 1, s, strlen(s)); return 0; }
 
-# Print the run-time banner: `yo <target> — <size> bytes\n`
-fn output_banner(target, size): i64 {
+# Print a packed IPv4 (high byte = first octet, matches ipv4_parse).
+fn _output_print_ipv4(packed): i64 {
+    fmt_int((packed >> 24) & 0xFF);
+    syscall(1, 1, ".", 1);
+    fmt_int((packed >> 16) & 0xFF);
+    syscall(1, 1, ".", 1);
+    fmt_int((packed >> 8) & 0xFF);
+    syscall(1, 1, ".", 1);
+    fmt_int(packed & 0xFF);
+    return 0;
+}
+
+# Print the run-time banner. When show_resolved is 1, a parenthetical
+# `(a.b.c.d)` follows the target — used when the target was a hostname
+# that DNS resolved. Shape:
+#   yo 8.8.8.8 — 56 bytes               (literal IP)
+#   yo google.com (142.250.x.x) — 56 bytes   (DNS-resolved)
+fn output_banner(target, packed_addr, show_resolved, size): i64 {
     _output_puts("yo ");
     _output_puts(target);
+    if (show_resolved == 1) {
+        _output_puts(" (");
+        _output_print_ipv4(packed_addr);
+        _output_puts(")");
+    }
     _output_puts(" — ");
     fmt_int(size);
     _output_puts(" bytes\n");

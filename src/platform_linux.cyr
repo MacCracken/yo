@@ -19,6 +19,7 @@
 
 var _LX_SYS_READ            = 0;
 var _LX_SYS_WRITE           = 1;
+var _LX_SYS_OPEN            = 2;
 var _LX_SYS_CLOSE           = 3;
 var _LX_SYS_RT_SIGPROCMASK  = 14;
 var _LX_SYS_NANOSLEEP       = 35;
@@ -33,6 +34,7 @@ var _LX_AF_INET       = 2;
 var _LX_SOCK_DGRAM    = 2;
 var _LX_SOCK_RAW      = 3;
 var _LX_IPPROTO_ICMP  = 1;
+var _LX_IPPROTO_UDP   = 17;
 var _LX_SOL_SOCKET    = 1;
 var _LX_SO_RCVTIMEO   = 20;
 var _LX_CLOCK_MONOTONIC = 1;
@@ -40,6 +42,7 @@ var _LX_SIG_BLOCK     = 0;
 var _LX_SIGINT        = 2;
 var _LX_SFD_NONBLOCK  = 2048;     # O_NONBLOCK octal 04000
 var _LX_SIGINFO_SIZE  = 128;      # sizeof(struct signalfd_siginfo)
+var _LX_O_RDONLY      = 0;
 
 # Open an ICMP socket. Tries unprivileged SOCK_DGRAM first; falls back
 # to SOCK_RAW. Returns fd ≥ 0 on success, negative on failure (the
@@ -68,13 +71,16 @@ fn platform_set_recv_timeout_ms(fd, timeout_ms): i64 {
 }
 
 # Build a sockaddr_in for the given packed IPv4 (host-byte-order, high
-# byte = first octet — matches ipv4_parse output). Writes octets one
-# byte at a time so the on-the-wire order is correct regardless of
-# host endianness.
-fn _lx_sockaddr_in(packed_addr): i64 {
+# byte = first octet — matches ipv4_parse output) and the given UDP/TCP
+# port. Writes octets one byte at a time so the on-the-wire order is
+# correct regardless of host endianness. Port is written big-endian
+# (network byte order, RFC 793 §3.1) into sin_port at off 2-3.
+fn _lx_sockaddr_in(packed_addr, port): i64 {
     var sa = alloc(16);
     memset(sa, 0, 16);
-    store16(sa, _LX_AF_INET);             # family (port stays 0)
+    store16(sa, _LX_AF_INET);
+    store8(sa + 2, (port >> 8) & 0xFF);
+    store8(sa + 3, port & 0xFF);
     store8(sa + 4, (packed_addr >> 24) & 0xFF);
     store8(sa + 5, (packed_addr >> 16) & 0xFF);
     store8(sa + 6, (packed_addr >> 8)  & 0xFF);
@@ -83,9 +89,9 @@ fn _lx_sockaddr_in(packed_addr): i64 {
 }
 
 # sendto(fd, pkt, pkt_len, 0, sa, 16). Returns bytes sent or negative
-# errno. Caller owns pkt and sa.
+# errno. Caller owns pkt and sa. ICMP socket ignores port — pass 0.
 fn platform_icmp_send_to(fd, packed_addr, pkt, pkt_len): i64 {
-    var sa = _lx_sockaddr_in(packed_addr);
+    var sa = _lx_sockaddr_in(packed_addr, 0);
     return syscall(_LX_SYS_SENDTO, fd, pkt, pkt_len, 0, sa, 16);
 }
 
@@ -93,6 +99,36 @@ fn platform_icmp_send_to(fd, packed_addr, pkt, pkt_len): i64 {
 # negative errno (notably -EAGAIN when SO_RCVTIMEO fires).
 fn platform_icmp_recv(fd, buf, maxlen): i64 {
     return syscall(_LX_SYS_RECVFROM, fd, buf, maxlen, 0, 0, 0);
+}
+
+# UDP socket open. Used by src/dns.cyr to talk to the resolver listed
+# in /etc/resolv.conf. Unprivileged — no special caps required.
+fn platform_udp_open(): i64 {
+    return syscall(_LX_SYS_SOCKET, _LX_AF_INET, _LX_SOCK_DGRAM, _LX_IPPROTO_UDP);
+}
+
+# sendto over UDP. port is the destination port (e.g. 53 for DNS).
+fn platform_udp_send_to(fd, packed_addr, port, pkt, pkt_len): i64 {
+    var sa = _lx_sockaddr_in(packed_addr, port);
+    return syscall(_LX_SYS_SENDTO, fd, pkt, pkt_len, 0, sa, 16);
+}
+
+# recvfrom over UDP. Same shape as platform_icmp_recv — we don't care
+# about the source address, just the payload.
+fn platform_udp_recv(fd, buf, maxlen): i64 {
+    return syscall(_LX_SYS_RECVFROM, fd, buf, maxlen, 0, 0, 0);
+}
+
+# Read up to maxlen bytes from path into buf. Returns bytes read on
+# success, negative errno on failure. Used by src/dns.cyr to slurp
+# /etc/resolv.conf. Single read() — fine for resolv.conf, which is
+# always tiny (< 4 KB on real systems).
+fn platform_read_file(path, buf, maxlen): i64 {
+    var fd = syscall(_LX_SYS_OPEN, path, _LX_O_RDONLY, 0);
+    if (fd < 0) { return fd; }
+    var n = syscall(_LX_SYS_READ, fd, buf, maxlen);
+    syscall(_LX_SYS_CLOSE, fd);
+    return n;
 }
 
 # Read CLOCK_MONOTONIC and return microseconds since boot.

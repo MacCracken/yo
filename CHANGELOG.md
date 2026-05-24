@@ -4,6 +4,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-05-23
+
+DNS resolution. `yo <hostname>` now works — first item in the 0.4.x DNS + UX-polish band per [roadmap.md](docs/development/roadmap.md).
+
+### Added
+- `src/dns.cyr` — RFC 1035 A-record resolver. QNAME encoder, query builder, response parser (handles compressed-pointer NAMEs, walks past CNAMEs to find the first A record), and an `/etc/resolv.conf` nameserver-line parser. Falls back to `1.1.1.1` when resolv.conf is missing/empty/IPv6-only. Two attempts at 2 s SO_RCVTIMEO before giving up. Self-contained: uses `platform_udp_*` directly, no `lib/net.cyr` import (per-backend sovereignty rule).
+- `src/platform_linux.cyr` — UDP primitives: `platform_udp_open`, `platform_udp_send_to(fd, packed_addr, port, ...)`, `platform_udp_recv`. New `platform_read_file(path, buf, maxlen)` for slurping `/etc/resolv.conf`. Refactored `_lx_sockaddr_in` to accept a port argument (network byte order), shared by ICMP (port=0) and UDP send paths.
+- `src/output.cyr` — `_output_print_ipv4(packed)` helper. `output_banner` now takes `(target, packed_addr, show_resolved, size)`; when `show_resolved=1` the banner appends `(a.b.c.d)` after the hostname.
+- `src/main.cyr` — on `ipv4_parse` failure, falls through to `dns_resolve(target)`. On success, banner shows both forms (`yo google.com (142.250.x.x)`); on failure, exits 2 with `yo: cannot resolve host: <name>`.
+- `tests/yo.tcyr` — 46 new assertions (133 total) covering QNAME encoding (happy + rejects), query builder field placement, name-skip (uncompressed / pointer / oversized-label reject), response parser (single A, CNAME-then-A, ID mismatch, non-zero RCODE, QR=0, truncated, ANCOUNT=0), and `/etc/resolv.conf` parsing (tab separator, comments, indented lines, IPv6 skip, missing trailing newline).
+
 ## [0.3.0] — 2026-05-23
 
 First working release. `yo <ipv4>` produces real ICMP echo probes on Linux.

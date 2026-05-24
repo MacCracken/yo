@@ -6,6 +6,8 @@ include "src/cli.cyr"
 include "src/ipv4.cyr"
 include "src/stats.cyr"
 include "src/output.cyr"
+include "src/platform.cyr"
+include "src/dns.cyr"
 
 # Format us into a stack buf, NUL-terminate, return the buf pointer
 # so streq can compare against an expected cstring.
@@ -232,6 +234,202 @@ fn main() {
     assert_eq(streq(_us_fmt(1234,    &fb), "1.23"),    1, "1234us → 1.23");
     assert_eq(streq(_us_fmt(9995,    &fb), "10.00"),   1, "9995us → 10.00 (carry)");
     assert_eq(streq(_us_fmt(1500000, &fb), "1500.00"), 1, "1500000us → 1500.00");
+
+    # ----- dns: qname encoder -----
+    test_group("dns _encode_qname");
+
+    var qn[32];
+    var qnlen = _dns_encode_qname("google.com", &qn);
+    assert_eq(qnlen, 12, "google.com → 12 bytes (6+google+3+com+0)");
+    assert_eq(load8(&qn + 0),  6,    "label0 length = 6");
+    assert_eq(load8(&qn + 1),  103,  "g = 0x67");
+    assert_eq(load8(&qn + 7),  3,    "label1 length = 3");
+    assert_eq(load8(&qn + 8),  99,   "c = 0x63");
+    assert_eq(load8(&qn + 11), 0,    "terminator");
+
+    # Trailing-dot accepted as canonical FQDN (same encoding as no-dot)
+    var qn2[32];
+    var qnlen2 = _dns_encode_qname("ex.io.", &qn2);
+    assert_eq(qnlen2, 7, "ex.io. (trailing dot) → 7 bytes");
+    assert_eq(load8(&qn2 + 0), 2, "first label len = 2");
+    assert_eq(load8(&qn2 + 3), 2, "second label len = 2");
+    assert_eq(load8(&qn2 + 6), 0, "terminator at off 6");
+
+    var qn2b[32];
+    var qnlen2b = _dns_encode_qname("ex.io", &qn2b);
+    assert_eq(qnlen2, qnlen2b, "trailing dot encodes identically");
+
+    # Rejects
+    var qn3[32];
+    assert(_dns_encode_qname("", &qn3)         < 0, "empty hostname rejected");
+    assert(_dns_encode_qname("..foo", &qn3)    < 0, "leading dot rejected");
+    assert(_dns_encode_qname("foo..bar", &qn3) < 0, "empty middle label rejected");
+    assert(_dns_encode_qname(".foo", &qn3)     < 0, "single leading dot rejected");
+
+    # ----- dns: build_query -----
+    test_group("dns _build_query");
+
+    var bq[64];
+    var bqlen = _dns_build_query(&bq, 0xABCD, "ex.com");
+    # Header(12) + qname("ex.com" = 2+ex+3+com+0 = 8) + qtype/class(4) = 24
+    assert_eq(bqlen, 24, "build_query ex.com → 24 bytes");
+    assert_eq(load8(&bq + 0),  0xAB, "id hi");
+    assert_eq(load8(&bq + 1),  0xCD, "id lo");
+    assert_eq(load8(&bq + 2),  0x01, "flags hi (RD=1)");
+    assert_eq(load8(&bq + 3),  0x00, "flags lo (Z=0, RCODE=0)");
+    assert_eq(load8(&bq + 5),  0x01, "QDCOUNT lo = 1");
+    assert_eq(load8(&bq + 7),  0x00, "ANCOUNT lo = 0");
+    # qname starts at off 12
+    assert_eq(load8(&bq + 12), 2,    "first label length = 2");
+    assert_eq(load8(&bq + 15), 3,    "second label length = 3");
+    assert_eq(load8(&bq + 19), 0,    "qname terminator at off 19");
+    # QTYPE/QCLASS at off 20-23
+    assert_eq(load8(&bq + 21), 1, "QTYPE lo = 1 (A)");
+    assert_eq(load8(&bq + 23), 1, "QCLASS lo = 1 (IN)");
+
+    # ----- dns: skip_name -----
+    test_group("dns _skip_name");
+
+    # Uncompressed: 3 'f' 'o' 'o' 3 'b' 'a' 'r' 0 → ends at off 9
+    var sn1[16];
+    store8(&sn1 + 0, 3); store8(&sn1 + 1, 102); store8(&sn1 + 2, 111); store8(&sn1 + 3, 111);
+    store8(&sn1 + 4, 3); store8(&sn1 + 5, 98);  store8(&sn1 + 6, 97);  store8(&sn1 + 7, 114);
+    store8(&sn1 + 8, 0);
+    assert_eq(_dns_skip_name(&sn1, 16, 0), 9, "uncompressed name ends past terminator");
+
+    # Pointer: 3 'f' 'o' 'o' C0 0C → ends at off 6
+    var sn2[16];
+    store8(&sn2 + 0, 3); store8(&sn2 + 1, 102); store8(&sn2 + 2, 111); store8(&sn2 + 3, 111);
+    store8(&sn2 + 4, 0xC0); store8(&sn2 + 5, 0x0C);
+    assert_eq(_dns_skip_name(&sn2, 16, 0), 6, "label then pointer = 2-byte pointer");
+
+    # Pointer-only at start
+    var sn3[8];
+    store8(&sn3 + 0, 0xC0); store8(&sn3 + 1, 0x0C);
+    assert_eq(_dns_skip_name(&sn3, 8, 0), 2, "bare pointer = 2 bytes");
+
+    # Malformed: oversized label length
+    var sn4[8];
+    store8(&sn4 + 0, 64);   # >63 and not a pointer
+    assert(_dns_skip_name(&sn4, 8, 0) < 0, "oversized label rejected");
+
+    # ----- dns: parse_response -----
+    test_group("dns _parse_response");
+
+    # Build a synthetic 41-byte response: ID=0xABCD, RCODE=0, 1 question
+    # (foo.bar A IN), 1 answer (pointer-to-qname, A, IN, TTL=120, 127.0.0.1)
+    var rsp[64];
+    # Header
+    store8(&rsp + 0,  0xAB); store8(&rsp + 1,  0xCD);    # ID
+    store8(&rsp + 2,  0x81); store8(&rsp + 3,  0x80);    # QR=1 RD=1 RA=1 RCODE=0
+    store8(&rsp + 4,  0);    store8(&rsp + 5,  1);       # QDCOUNT=1
+    store8(&rsp + 6,  0);    store8(&rsp + 7,  1);       # ANCOUNT=1
+    store8(&rsp + 8,  0);    store8(&rsp + 9,  0);       # NSCOUNT
+    store8(&rsp + 10, 0);    store8(&rsp + 11, 0);       # ARCOUNT
+    # Question: foo.bar A IN
+    store8(&rsp + 12, 3); store8(&rsp + 13, 102); store8(&rsp + 14, 111); store8(&rsp + 15, 111);
+    store8(&rsp + 16, 3); store8(&rsp + 17, 98);  store8(&rsp + 18, 97);  store8(&rsp + 19, 114);
+    store8(&rsp + 20, 0);
+    store8(&rsp + 21, 0); store8(&rsp + 22, 1);          # QTYPE A
+    store8(&rsp + 23, 0); store8(&rsp + 24, 1);          # QCLASS IN
+    # Answer: pointer to off 12, A IN, TTL=120, RDLEN=4, 127.0.0.1
+    store8(&rsp + 25, 0xC0); store8(&rsp + 26, 0x0C);
+    store8(&rsp + 27, 0); store8(&rsp + 28, 1);          # TYPE A
+    store8(&rsp + 29, 0); store8(&rsp + 30, 1);          # CLASS IN
+    store8(&rsp + 31, 0); store8(&rsp + 32, 0); store8(&rsp + 33, 0); store8(&rsp + 34, 120);
+    store8(&rsp + 35, 0); store8(&rsp + 36, 4);          # RDLENGTH=4
+    store8(&rsp + 37, 127); store8(&rsp + 38, 0); store8(&rsp + 39, 0); store8(&rsp + 40, 1);
+
+    assert_eq(_dns_parse_response(&rsp, 41, 0xABCD), 0x7F000001, "A record → 127.0.0.1");
+
+    # ID mismatch rejected
+    assert(_dns_parse_response(&rsp, 41, 0x1234) < 0, "wrong qid rejected");
+
+    # RCODE != 0 rejected (NXDOMAIN = 3)
+    store8(&rsp + 3, 0x83);
+    assert(_dns_parse_response(&rsp, 41, 0xABCD) < 0, "non-zero RCODE rejected");
+    store8(&rsp + 3, 0x80);    # restore
+
+    # QR bit clear (it's a query, not a response) → rejected
+    store8(&rsp + 2, 0x01);
+    assert(_dns_parse_response(&rsp, 41, 0xABCD) < 0, "QR=0 rejected");
+    store8(&rsp + 2, 0x81);    # restore
+
+    # Truncated response (header only) rejected
+    assert(_dns_parse_response(&rsp, 8, 0xABCD) < 0, "len < header rejected");
+
+    # ANCOUNT=0 rejected (no records to parse)
+    store8(&rsp + 7, 0);
+    assert(_dns_parse_response(&rsp, 41, 0xABCD) < 0, "ANCOUNT=0 rejected");
+    store8(&rsp + 7, 1);       # restore
+
+    # Multi-answer: CNAME first, A second. Tests the skip-non-A path.
+    # Layout: header(12) + question(13) + CNAME ans(2+10+rdata) + A ans
+    var rsp2[80];
+    # Header
+    store8(&rsp2 + 0,  0x12); store8(&rsp2 + 1,  0x34);    # ID
+    store8(&rsp2 + 2,  0x81); store8(&rsp2 + 3,  0x80);    # flags
+    store8(&rsp2 + 4,  0);    store8(&rsp2 + 5,  1);       # QDCOUNT=1
+    store8(&rsp2 + 6,  0);    store8(&rsp2 + 7,  2);       # ANCOUNT=2
+    store8(&rsp2 + 8,  0);    store8(&rsp2 + 9,  0);
+    store8(&rsp2 + 10, 0);    store8(&rsp2 + 11, 0);
+    # Question: a.b
+    store8(&rsp2 + 12, 1); store8(&rsp2 + 13, 97);
+    store8(&rsp2 + 14, 1); store8(&rsp2 + 15, 98);
+    store8(&rsp2 + 16, 0);
+    store8(&rsp2 + 17, 0); store8(&rsp2 + 18, 1);          # QTYPE A
+    store8(&rsp2 + 19, 0); store8(&rsp2 + 20, 1);          # QCLASS IN
+    # CNAME answer at off 21: ptr(2) + TYPE=5(2) + CLASS=1(2) + TTL(4) + RDLEN=4(2) + 4 bytes rdata
+    store8(&rsp2 + 21, 0xC0); store8(&rsp2 + 22, 0x0C);
+    store8(&rsp2 + 23, 0);    store8(&rsp2 + 24, 5);       # TYPE CNAME
+    store8(&rsp2 + 25, 0);    store8(&rsp2 + 26, 1);       # CLASS IN
+    store8(&rsp2 + 27, 0); store8(&rsp2 + 28, 0); store8(&rsp2 + 29, 0); store8(&rsp2 + 30, 60);
+    store8(&rsp2 + 31, 0);    store8(&rsp2 + 32, 4);       # RDLEN 4 (4-byte rdata for compactness)
+    store8(&rsp2 + 33, 1); store8(&rsp2 + 34, 1); store8(&rsp2 + 35, 1); store8(&rsp2 + 36, 1);
+    # A answer at off 37
+    store8(&rsp2 + 37, 0xC0); store8(&rsp2 + 38, 0x0C);
+    store8(&rsp2 + 39, 0);    store8(&rsp2 + 40, 1);       # TYPE A
+    store8(&rsp2 + 41, 0);    store8(&rsp2 + 42, 1);       # CLASS IN
+    store8(&rsp2 + 43, 0); store8(&rsp2 + 44, 0); store8(&rsp2 + 45, 0); store8(&rsp2 + 46, 60);
+    store8(&rsp2 + 47, 0);    store8(&rsp2 + 48, 4);       # RDLEN 4
+    store8(&rsp2 + 49, 8); store8(&rsp2 + 50, 8); store8(&rsp2 + 51, 8); store8(&rsp2 + 52, 8);
+
+    assert_eq(_dns_parse_response(&rsp2, 53, 0x1234), 0x08080808, "CNAME skipped, A returned");
+
+    # ----- dns: resolv.conf parser -----
+    test_group("dns _resolv_conf");
+
+    # Single line, space separator
+    var rc1 = "nameserver 8.8.8.8\n";
+    assert_eq(_dns_resolv_conf_nameserver(rc1, strlen(rc1)), 0x08080808, "single nameserver line");
+
+    # Tab separator + multiple lines (first wins)
+    var rc2 = "nameserver\t1.1.1.1\nnameserver 9.9.9.9\n";
+    assert_eq(_dns_resolv_conf_nameserver(rc2, strlen(rc2)), 0x01010101, "tab separator, first wins");
+
+    # Comment + leading-ws skipped
+    var rc3 = "# top comment\n  nameserver 8.8.4.4\n";
+    assert_eq(_dns_resolv_conf_nameserver(rc3, strlen(rc3)), 0x08080404, "comment + indented line");
+
+    # Other directives skipped
+    var rc4 = "options ndots:1\nsearch lan\nnameserver 1.2.3.4\n";
+    assert_eq(_dns_resolv_conf_nameserver(rc4, strlen(rc4)), 0x01020304, "skip non-nameserver directives");
+
+    # Commented-out nameserver not picked
+    var rc5 = "#nameserver 8.8.8.8\n";
+    assert(_dns_resolv_conf_nameserver(rc5, strlen(rc5)) < 0, "commented nameserver ignored");
+
+    # No file content
+    var rc6 = "";
+    assert(_dns_resolv_conf_nameserver(rc6, 0) < 0, "empty content → FAIL");
+
+    # IPv6 nameserver skipped, IPv4 next line picked up
+    var rc7 = "nameserver fe80::1\nnameserver 4.4.4.4\n";
+    assert_eq(_dns_resolv_conf_nameserver(rc7, strlen(rc7)), 0x04040404, "IPv6 line skipped, IPv4 picked");
+
+    # Missing trailing newline on last line still parses
+    var rc8 = "nameserver 5.6.7.8";
+    assert_eq(_dns_resolv_conf_nameserver(rc8, strlen(rc8)), 0x05060708, "no trailing newline ok");
 
     return assert_summary();
 }

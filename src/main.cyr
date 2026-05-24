@@ -7,6 +7,7 @@ include "src/ipv4.cyr"
 include "src/stats.cyr"
 include "src/output.cyr"
 include "src/platform.cyr"
+include "src/dns.cyr"
 include "src/probe.cyr"
 
 # Build a contiguous argv pointer array (cstr*) from args.cyr's
@@ -41,14 +42,22 @@ fn main() {
 
     var target = cli_target(reg);
     var addr = ipv4_parse(target);
+    var show_resolved = 0;
     if (addr < 0) {
-        _eputs("yo: hostname targets not supported yet (DNS pending, roadmap § 0.3.x) — use a dotted-quad like 8.8.8.8\n");
-        return 2;
+        addr = dns_resolve(target);
+        if (addr < 0) {
+            _eputs("yo: cannot resolve host: ");
+            _eputs(target);
+            _eputs("\n");
+            return 2;
+        }
+        show_resolved = 1;
     }
 
     return probe_run(
         target,
         addr,
+        show_resolved,
         cli_count(reg),
         cli_timeout_ms(reg),
         cli_interval_ms(reg),
