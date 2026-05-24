@@ -3,6 +3,7 @@
 
 include "src/icmp.cyr"
 include "src/cli.cyr"
+include "src/ipv4.cyr"
 
 # Build a synthetic argv pointer-array from up to 8 cstring literals.
 # Pass 0 for unused slots; we'll only honor the first `ac` entries.
@@ -131,6 +132,33 @@ fn main() {
     var reg_u = cli_new();
     var av_u = _mk_argv("yo", "--nope", "host", 0, 0, 0, 0, 0);
     assert_eq(cli_parse_argv(reg_u, 3, av_u), CLI_ERR_PARSE, "unknown long flag → CLI_ERR_PARSE");
+
+    # ----- ipv4_parse: happy paths -----
+    test_group("ipv4_parse valid");
+
+    assert_eq(ipv4_parse("0.0.0.0"),         0x00000000, "all zeros");
+    assert_eq(ipv4_parse("127.0.0.1"),       0x7F000001, "loopback");
+    assert_eq(ipv4_parse("192.168.1.1"),     0xC0A80101, "rfc1918 /16");
+    assert_eq(ipv4_parse("255.255.255.255"), 0xFFFFFFFF, "broadcast / max");
+    assert_eq(ipv4_parse("8.8.8.8"),         0x08080808, "single-digit segs");
+    assert_eq(ipv4_parse("10.20.30.40"),     0x0A141E28, "two-digit segs");
+
+    # ----- ipv4_parse: rejects -----
+    test_group("ipv4_parse invalid");
+
+    assert(ipv4_parse("")          < 0, "empty string rejected");
+    assert(ipv4_parse("1.2.3")     < 0, "too few segments");
+    assert(ipv4_parse("1.2.3.4.5") < 0, "too many segments");
+    assert(ipv4_parse("256.0.0.0") < 0, "segment > 255");
+    assert(ipv4_parse("999.0.0.0") < 0, "3-digit overflow caught mid-parse");
+    assert(ipv4_parse("1.2.3.4 ")  < 0, "trailing space rejected");
+    assert(ipv4_parse("1.2.3.")    < 0, "trailing dot rejected");
+    assert(ipv4_parse(".1.2.3.4")  < 0, "leading dot rejected");
+    assert(ipv4_parse("1..2.3")    < 0, "empty segment rejected");
+    assert(ipv4_parse("abc")       < 0, "alpha-only rejected");
+    assert(ipv4_parse("1.2.3.4a")  < 0, "trailing garbage rejected");
+    assert(ipv4_parse("1234.5.6.7") < 0, "4-digit segment rejected");
+    assert_eq(ipv4_parse(0), IPV4_PARSE_FAIL, "null ptr → FAIL sentinel");
 
     return assert_summary();
 }

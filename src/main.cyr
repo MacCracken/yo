@@ -3,6 +3,7 @@
 
 include "src/icmp.cyr"
 include "src/cli.cyr"
+include "src/ipv4.cyr"
 
 # Build a contiguous argv pointer array (cstr*) from args.cyr's
 # argc()/argv(n) surface. flags_parse() reads `argv + i*8`, but
@@ -37,6 +38,15 @@ fn _print_planned(reg): i64 {
     _puts("ms, interval=");
     fmt_int(cli_interval_ms(reg));
     println("ms)");
+
+    var addr = ipv4_parse(t);
+    if (addr < 0) {
+        println("  (target is not a dotted-quad — DNS resolution pending, roadmap § 0.3.x)");
+    } else {
+        _puts("  addr=");
+        fmt_hex0x(addr);
+        println("");
+    }
     println("  (kernel ICMP surface pending — see docs/development/roadmap.md § 0.2.x)");
     return 0;
 }

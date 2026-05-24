@@ -1,0 +1,45 @@
+# ipv4.cyr — strict dotted-quad parser.
+#
+# Single-purpose. Pure code. Mirrors agnos/kernel/core/net.cyr:21 ip4()
+# packing: (a<<24) | (b<<16) | (c<<8) | d — so a parsed address is
+# byte-comparable with kernel-side struct fields.
+#
+# Strict grammar: D '.' D '.' D '.' D '\0'  where D = one to three
+# decimal digits, value in [0, 255]. No empty segments. No leading
+# garbage. No trailing garbage. No spaces. DNS resolution (hostname
+# targets) is a separate concern — roadmap 0.3.x DNS via taar.
+
+var IPV4_PARSE_FAIL = 0 - 1;   # i64 sentinel; any valid packed v4 is ≤ 0xFFFFFFFF.
+
+# Returns the packed u32 address on success, IPV4_PARSE_FAIL on any
+# rejection. Caller checks `result < 0` to detect failure.
+fn ipv4_parse(s): i64 {
+    if (s == 0) { return IPV4_PARSE_FAIL; }
+    var i = 0;
+    var packed = 0;
+    var seg = 0;
+    while (seg < 4) {
+        var oct = 0;
+        var digits = 0;
+        var c = load8(s + i);
+        while (c >= 48) {
+            if (c > 57) { break; }
+            oct = oct * 10 + (c - 48);
+            if (oct > 255) { return IPV4_PARSE_FAIL; }
+            digits = digits + 1;
+            if (digits > 3) { return IPV4_PARSE_FAIL; }
+            i = i + 1;
+            c = load8(s + i);
+        }
+        if (digits == 0) { return IPV4_PARSE_FAIL; }
+        packed = (packed << 8) | oct;
+        if (seg < 3) {
+            if (c != 46) { return IPV4_PARSE_FAIL; }   # '.' = 46
+            i = i + 1;
+        } else {
+            if (c != 0) { return IPV4_PARSE_FAIL; }    # must terminate after 4th octet
+        }
+        seg = seg + 1;
+    }
+    return packed;
+}
