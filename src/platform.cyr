@@ -1,0 +1,13 @@
+# platform.cyr — platform dispatch shim.
+#
+# Today: Linux only. The platform_* surface (platform_icmp_open,
+# platform_icmp_send_to, platform_icmp_recv, platform_now_us,
+# platform_sleep_ms, platform_close, platform_set_recv_timeout_ms)
+# is defined in src/platform_linux.cyr.
+#
+# Later: this file gains #ifdef CYRIUS_TARGET_AGNOS, _WINDOWS, _MACOS
+# branches per the cyrius/lib args.cyr pattern. The AGNOS branch
+# replaces the POSIX socket() path with the sovereign icmp_echo /
+# net_send_raw kernel primitives; the rest stay POSIX-ish.
+
+include "src/platform_linux.cyr"

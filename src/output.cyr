@@ -83,8 +83,9 @@ fn output_summary(s): i64 {
         _output_print_us_as_ms(stats_avg_us(s));
         syscall(1, 1, "/", 1);
         _output_print_us_as_ms(stats_max_us(s));
-        _output_puts(" ms");
+        _output_puts(" ms\n");
+    } else {
+        _output_puts("\n");
     }
-    syscall(1, 1, "\n", 1);
     return 0;
 }

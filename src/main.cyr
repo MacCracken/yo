@@ -4,6 +4,10 @@
 include "src/icmp.cyr"
 include "src/cli.cyr"
 include "src/ipv4.cyr"
+include "src/stats.cyr"
+include "src/output.cyr"
+include "src/platform.cyr"
+include "src/probe.cyr"
 
 # Build a contiguous argv pointer array (cstr*) from args.cyr's
 # argc()/argv(n) surface. flags_parse() reads `argv + i*8`, but
@@ -18,38 +22,8 @@ fn _materialize_argv(ac): i64 {
     return av;
 }
 
-# Print one literal to stdout via strlen — avoids hand-counted lengths
-# (which were one-off-leaking adjacent string-table memory in v0.1.0
-# of this banner).
 fn _puts(s): i64 { syscall(1, 1, s, strlen(s)); return 0; }
-
-# Print the banner for a planned probe. Stand-in for real per-packet
-# output until roadmap.md § 0.2.x lands the kernel ICMP surface.
-fn _print_planned(reg): i64 {
-    _puts("yo ");
-    var t = cli_target(reg);
-    _puts(t);
-    _puts(" — ");
-    fmt_int(cli_count(reg));
-    _puts(" echoes × ");
-    fmt_int(cli_size(reg));
-    _puts(" bytes (timeout=");
-    fmt_int(cli_timeout_ms(reg));
-    _puts("ms, interval=");
-    fmt_int(cli_interval_ms(reg));
-    println("ms)");
-
-    var addr = ipv4_parse(t);
-    if (addr < 0) {
-        println("  (target is not a dotted-quad — DNS resolution pending, roadmap § 0.3.x)");
-    } else {
-        _puts("  addr=");
-        fmt_hex0x(addr);
-        println("");
-    }
-    println("  (kernel ICMP surface pending — see docs/development/roadmap.md § 0.2.x)");
-    return 0;
-}
+fn _eputs(s): i64 { syscall(1, 2, s, strlen(s)); return 0; }
 
 fn main() {
     alloc_init();
@@ -61,12 +35,26 @@ fn main() {
     var rc = cli_parse_argv(reg, ac, av);
 
     if (rc == CLI_HELP)               { cli_print_help(reg); return 0; }
-    if (rc == CLI_ERR_PARSE)          { var e1 = "yo: bad option\n";          syscall(1, 2, e1, strlen(e1)); cli_print_usage(2); return 2; }
-    if (rc == CLI_ERR_NEGATIVE)       { var e2 = "yo: negative value\n";      syscall(1, 2, e2, strlen(e2)); cli_print_usage(2); return 2; }
-    if (rc == CLI_ERR_MISSING_TARGET) { var e3 = "yo: missing target host\n"; syscall(1, 2, e3, strlen(e3)); cli_print_usage(2); return 2; }
+    if (rc == CLI_ERR_PARSE)          { _eputs("yo: bad option\n");          cli_print_usage(2); return 2; }
+    if (rc == CLI_ERR_NEGATIVE)       { _eputs("yo: negative value\n");      cli_print_usage(2); return 2; }
+    if (rc == CLI_ERR_MISSING_TARGET) { _eputs("yo: missing target host\n"); cli_print_usage(2); return 2; }
 
-    _print_planned(reg);
-    return 0;
+    var target = cli_target(reg);
+    var addr = ipv4_parse(target);
+    if (addr < 0) {
+        _eputs("yo: hostname targets not supported yet (DNS pending, roadmap § 0.3.x) — use a dotted-quad like 8.8.8.8\n");
+        return 2;
+    }
+
+    return probe_run(
+        target,
+        addr,
+        cli_count(reg),
+        cli_timeout_ms(reg),
+        cli_interval_ms(reg),
+        cli_size(reg),
+        cli_quiet(reg)
+    );
 }
 
 var r = main();

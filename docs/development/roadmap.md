@@ -20,18 +20,29 @@
 
 Ordered by dependency. Items further down depend on items earlier.
 
-### 0.2.x — Kernel ICMP primitive (kernel-side, in `agnos`)
+### 0.3.x — Linux MVP (single-host, single-shot) ✅ landed (unreleased)
 
-**Blocked on**: nothing — can start when r8169 LAN-on-iron is unblocked (currently iron Attempt 97 pending for r8169 RX-path 5-part bundle; see [agnosticos iron-nuc-zen-log](https://github.com/MacCracken/agnosticos/blob/main/docs/development/iron-nuc-zen-log.md)).
+**Not blocked on agnos.** Per the platform-pivot (2026-05-23), yo ships a Linux backend first via POSIX socket() under `src/platform_linux.cyr`; the AGNOS backend slots in later as a sibling file. Substrate extraction (`taar`) waits for a second consumer (dig) to drive it — yo absorbs everything inline for now.
 
-- [ ] Cyrius-native syscall surface in `agnos/kernel/core/net.cyr`. Per [[project_agnos_kernel_growth_rules]] — NOT POSIX `socket()`; either a focused `icmp_echo(addr, timeout) → rtt_us` or the more general `net_send_raw` + `net_recv_raw` pair. Shape decided by what `yo` actually needs, refined when `dig` arrives.
-- [ ] ICMP echo request / reply framing + RFC 792 checksum verification.
+- [x] `src/main.cyr` argument parsing via `lib/args.cyr` and `lib/flags.cyr` (-c -W -i -s -q -v -h).
+- [x] IPv4 address parsing (`a.b.c.d`); IPv6 deferred to 0.4.x.
+- [x] RFC 792 ICMP framing + RFC 1071 checksum (`src/icmp.cyr`).
+- [x] RTT accumulator + summary format (`src/stats.cyr` + `src/output.cyr`).
+- [x] Linux backend: unprivileged SOCK_DGRAM ICMP with SOCK_RAW fallback (`src/platform_linux.cyr`).
+- [x] Probe loop: per-packet send/recv with SO_RCVTIMEO, sleep between iterations (`src/probe.cyr`).
+- [x] Per-packet output (`seq=N rtt=X.XX ms` / `seq=N timeout`) + summary; POSIX exit codes (0 / 1 / 2).
+- [ ] Ctrl-C signal handler → flush summary, exit per POSIX. Currently Ctrl-C kills mid-loop without summary.
+- [ ] DNS resolution path. Will roll into yo inline; extraction to `taar` waits for `dig` to grow into a real consumer per [[project_tools_stable_ideas]].
+
+### 0.2.x — AGNOS backend (kernel-side, in `agnos`)
+
+**Reframed**: no longer the gate for yo MVP. yo runs on Linux today; this lands the AGNOS backend as a sibling to `src/platform_linux.cyr`. Still blocked on r8169 RX-path 5-part bundle iron-validating (Attempt 97 pending; see [agnosticos iron-nuc-zen-log](https://github.com/MacCracken/agnosticos/blob/main/docs/development/iron-nuc-zen-log.md)).
+
+- [ ] Cyrius-native syscall surface in `agnos/kernel/core/net.cyr`. Per [[project_agnos_kernel_growth_rules]] — NOT POSIX `socket()`; either focused `icmp_echo(addr, timeout) → rtt_us` or the general `net_send_raw` + `net_recv_raw` pair. Shape decided by what yo's Linux backend ended up needing, now that we have a concrete reference.
+- [ ] ICMP echo framing + RFC 792 checksum verification kernel-side (yo's `src/icmp.cyr` is the byte-for-byte reference).
 - [ ] Per-process ICMP listener registration (analogous to UDP listener table at `net.cyr:142-196`).
-- [ ] QEMU-side smoke: `qemu-net-icmp-smoke.sh` boots kernel + sends a self-loopback ICMP echo, asserts rtt > 0.
-
-### 0.3.x — yo MVP (single-host, single-shot)
-
-**Blocked on**: 0.2.x kernel syscall surface landing.
+- [ ] QEMU smoke: `qemu-net-icmp-smoke.sh` boots kernel + sends a self-loopback ICMP echo, asserts rtt > 0.
+- [ ] `src/platform_agnos.cyr` in yo, dispatched by `#ifdef CYRIUS_TARGET_AGNOS` in `src/platform.cyr`.
 
 - [ ] `src/main.cyr` argument parsing via `lib/args.cyr` and `lib/flags.cyr`. Flags: `-c <count>` (default 4), `-W <timeout_ms>` (default 1000), `-i <interval_ms>` (default 1000), `-s <payload_bytes>` (default 56), `-q` (quiet, summary only), `-v` (verbose, per-packet detail).
 - [ ] DNS resolution path. **Decision point**: stays in `yo` as a vendored `taar.dns` shim until `dig` arrives, OR drives the `taar` extraction immediately. Per [[project_tools_stable_ideas]] memory, the three-consumer brainstorm (yo + whirl + dig) justifies extracting `taar` from cycle-open. Leans toward immediate extraction.
@@ -88,7 +99,7 @@ Ship 1.0 when all of these are true. Pre-1.0 minor cycles can land partial subse
 - [ ] **`taar` extracted** as a separate repo. `yo` depends on `taar`; the kernel network primitives are not vendored back into `yo`.
 - [ ] **LAN-on-iron validated** on archaemenid against the home gateway (`192.168.1.1`) and at least one WAN host (`8.8.8.8`).
 - [ ] **QEMU + localhost validated** via `scripts/qemu-smoke.sh` — boots a kernel with yo in the initrd, pings 127.0.0.1, asserts RTT > 0 and < 5 ms.
-- [ ] **No POSIX `socket()`** anywhere in `yo` or `taar`. Sovereign kernel primitives only. Audit pass per [first-party-standards § Security Hardening](https://github.com/MacCracken/agnosticos/blob/main/docs/development/first-party/first-party-standards.md#security-hardening-required-before-every-release).
+- [ ] **No POSIX `socket()` in the AGNOS backend** (`src/platform_agnos.cyr`). Sovereign kernel primitives only on that path. The Linux backend (`src/platform_linux.cyr`) uses POSIX socket() pragmatically — this is intentional per the per-backend sovereignty rule. Audit pass per [first-party-standards § Security Hardening](https://github.com/MacCracken/agnosticos/blob/main/docs/development/first-party/first-party-standards.md#security-hardening-required-before-every-release) covers the AGNOS path only.
 - [ ] **Tests**: `scripts/test.sh` ≥ 30 assertions covering arg parsing, RTT formatting, summary computation, error paths. `tests/yo.fcyr` fuzz harness for the response-frame parser. `tests/yo.bcyr` benchmark vs Linux's `iputils-ping` on the same hardware (within 10% wall-clock parity, target binary size ≤ 30 KB).
 - [ ] **Docs**: ADR for the kernel-syscall-shape decision (focused `icmp_echo` vs general `net_send_raw`), architecture note for the response-frame parsing invariants, guide for the diagnostic flow when 100% loss happens.
 - [ ] **CI green**: `.github/workflows/{ci,release}.yml` both green on the v1.0 candidate commit. Release workflow auto-uploads `build/yo` to the GitHub release.

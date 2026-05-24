@@ -1,0 +1,110 @@
+# platform_linux.cyr — Linux backend.
+#
+# Self-contained: raw syscalls only, no lib/net.cyr import. The
+# lib/net.cyr surface covers TCP/UDP but not ICMP / sendto / recvfrom,
+# and it wraps results in tagged unions that this thin backend doesn't
+# need.
+#
+# Sovereignty posture (per-backend rule): this file uses POSIX socket()
+# pragmatically. The AGNOS backend (future) will use the sovereign
+# icmp_echo / net_send_raw primitives instead. v1.0 release gate
+# enforces no-POSIX on the AGNOS backend only.
+#
+# Socket strategy:
+#   1. SOCK_DGRAM + IPPROTO_ICMP — unprivileged "ping socket". Works
+#      on most modern Linuxes when the caller's GID falls inside
+#      /proc/sys/net/ipv4/ping_group_range.
+#   2. Fallback to SOCK_RAW + IPPROTO_ICMP — needs root or CAP_NET_RAW.
+#   3. Both fail → return negative, caller surfaces the EACCES.
+
+var _LX_SYS_READ          = 0;
+var _LX_SYS_WRITE         = 1;
+var _LX_SYS_CLOSE         = 3;
+var _LX_SYS_NANOSLEEP     = 35;
+var _LX_SYS_SOCKET        = 41;
+var _LX_SYS_SENDTO        = 44;
+var _LX_SYS_RECVFROM      = 45;
+var _LX_SYS_SETSOCKOPT    = 54;
+var _LX_SYS_CLOCK_GETTIME = 228;
+
+var _LX_AF_INET       = 2;
+var _LX_SOCK_DGRAM    = 2;
+var _LX_SOCK_RAW      = 3;
+var _LX_IPPROTO_ICMP  = 1;
+var _LX_SOL_SOCKET    = 1;
+var _LX_SO_RCVTIMEO   = 20;
+var _LX_CLOCK_MONOTONIC = 1;
+
+# Open an ICMP socket. Tries unprivileged SOCK_DGRAM first; falls back
+# to SOCK_RAW. Returns fd ≥ 0 on success, negative on failure (the
+# value is the kernel's negated errno from the last attempt).
+fn platform_icmp_open(): i64 {
+    var fd = syscall(_LX_SYS_SOCKET, _LX_AF_INET, _LX_SOCK_DGRAM, _LX_IPPROTO_ICMP);
+    if (fd >= 0) { return fd; }
+    var fd2 = syscall(_LX_SYS_SOCKET, _LX_AF_INET, _LX_SOCK_RAW, _LX_IPPROTO_ICMP);
+    return fd2;
+}
+
+fn platform_close(fd): i64 {
+    return syscall(_LX_SYS_CLOSE, fd);
+}
+
+# Apply SO_RCVTIMEO so blocking recvfrom returns -EAGAIN after
+# timeout_ms instead of waiting forever. Kernel's timeval struct is
+# {tv_sec: i64, tv_usec: i64} on 64-bit Linux (16 bytes).
+fn platform_set_recv_timeout_ms(fd, timeout_ms): i64 {
+    var tv = alloc(16);
+    var secs  = timeout_ms / 1000;
+    var usecs = (timeout_ms % 1000) * 1000;
+    store64(tv,     secs);
+    store64(tv + 8, usecs);
+    return syscall(_LX_SYS_SETSOCKOPT, fd, _LX_SOL_SOCKET, _LX_SO_RCVTIMEO, tv, 16);
+}
+
+# Build a sockaddr_in for the given packed IPv4 (host-byte-order, high
+# byte = first octet — matches ipv4_parse output). Writes octets one
+# byte at a time so the on-the-wire order is correct regardless of
+# host endianness.
+fn _lx_sockaddr_in(packed_addr): i64 {
+    var sa = alloc(16);
+    memset(sa, 0, 16);
+    store16(sa, _LX_AF_INET);             # family (port stays 0)
+    store8(sa + 4, (packed_addr >> 24) & 0xFF);
+    store8(sa + 5, (packed_addr >> 16) & 0xFF);
+    store8(sa + 6, (packed_addr >> 8)  & 0xFF);
+    store8(sa + 7, packed_addr & 0xFF);
+    return sa;
+}
+
+# sendto(fd, pkt, pkt_len, 0, sa, 16). Returns bytes sent or negative
+# errno. Caller owns pkt and sa.
+fn platform_icmp_send_to(fd, packed_addr, pkt, pkt_len): i64 {
+    var sa = _lx_sockaddr_in(packed_addr);
+    return syscall(_LX_SYS_SENDTO, fd, pkt, pkt_len, 0, sa, 16);
+}
+
+# recvfrom(fd, buf, maxlen, 0, NULL, NULL). Returns bytes received or
+# negative errno (notably -EAGAIN when SO_RCVTIMEO fires).
+fn platform_icmp_recv(fd, buf, maxlen): i64 {
+    return syscall(_LX_SYS_RECVFROM, fd, buf, maxlen, 0, 0, 0);
+}
+
+# Read CLOCK_MONOTONIC and return microseconds since boot.
+fn platform_now_us(): i64 {
+    var ts = alloc(16);
+    syscall(_LX_SYS_CLOCK_GETTIME, _LX_CLOCK_MONOTONIC, ts);
+    var secs = load64(ts);
+    var nsec = load64(ts + 8);
+    return secs * 1000000 + nsec / 1000;
+}
+
+# nanosleep for ms milliseconds. nanosleep accepts {tv_sec, tv_nsec};
+# pass NULL for the remaining-time output (we don't care about
+# interruptions for inter-packet delay).
+fn platform_sleep_ms(ms): i64 {
+    if (ms <= 0) { return 0; }
+    var ts = alloc(16);
+    store64(ts,     ms / 1000);
+    store64(ts + 8, (ms % 1000) * 1000000);
+    return syscall(_LX_SYS_NANOSLEEP, ts, 0);
+}

@@ -1,0 +1,88 @@
+# probe.cyr — the actual ICMP probe loop.
+#
+# Ties together: src/platform.cyr (socket I/O + clock + sleep),
+# src/icmp.cyr (RFC 792 framing + RFC 1071 checksum), src/stats.cyr
+# (RTT accumulator), src/output.cyr (per-packet + summary printing).
+#
+# Exit code matches POSIX ping: 0 if at least one reply, 1 if all
+# packets lost, 2 if the socket couldn't even open.
+
+# Build a deterministic filler payload of `n` bytes. Sequential 0..255
+# wrap pattern — same as iputils-ping. Caller owns the buffer.
+fn _probe_fill_payload(buf, n): i64 {
+    var i = 0;
+    while (i < n) {
+        store8(buf + i, i & 0xFF);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Run the full probe sequence. Returns the process exit code.
+fn probe_run(target_cstr, packed_addr, count, timeout_ms, interval_ms, size, quiet): i64 {
+    var fd = platform_icmp_open();
+    if (fd < 0) {
+        var msg = "yo: cannot open ICMP socket — try adjusting /proc/sys/net/ipv4/ping_group_range or run with CAP_NET_RAW\n";
+        syscall(_LX_SYS_WRITE, 2, msg, strlen(msg));
+        return 2;
+    }
+    platform_set_recv_timeout_ms(fd, timeout_ms);
+
+    var payload = alloc(size);
+    _probe_fill_payload(payload, size);
+    var pkt = alloc(ICMP_HEADER_LEN + size);
+    # rx buf: ICMP header + max payload + slack for any IP/extension
+    # bytes the kernel might surface even on SOCK_DGRAM (it doesn't,
+    # but slack is cheap).
+    var rxcap = ICMP_HEADER_LEN + size + 64;
+    var rxbuf = alloc(rxcap);
+
+    # Ident is arbitrary on SOCK_DGRAM (kernel rewrites it with the
+    # socket-table-managed ID). We still set something deterministic
+    # in case the SOCK_RAW fallback is in play, where ident is ours.
+    var ident = 0x1234;
+
+    var s = stats_new();
+    if (quiet == 0) { output_banner(target_cstr, size); }
+
+    var seq = 0;
+    while (seq < count) {
+        var pkt_len = icmp_build_echo_request(pkt, ident, seq, payload, size);
+
+        var t0 = platform_now_us();
+        var sent = platform_icmp_send_to(fd, packed_addr, pkt, pkt_len);
+        if (sent < 0) {
+            stats_record_loss(s);
+            if (quiet == 0) { output_timeout(seq); }
+        } else {
+            var n = platform_icmp_recv(fd, rxbuf, rxcap);
+            var t1 = platform_now_us();
+            if (n < ICMP_HEADER_LEN) {
+                stats_record_loss(s);
+                if (quiet == 0) { output_timeout(seq); }
+            } else {
+                # Accept any ICMP echo reply. SOCK_DGRAM filters the
+                # socket-managed ident on our behalf; on SOCK_RAW we
+                # accept the first matching frame (good enough for v0;
+                # reorder/dedupe is a 0.4.x concern).
+                if (icmp_type(rxbuf) != ICMP_ECHO_REPLY) {
+                    stats_record_loss(s);
+                    if (quiet == 0) { output_timeout(seq); }
+                } else {
+                    var rtt = t1 - t0;
+                    stats_record_reply(s, rtt);
+                    if (quiet == 0) { output_reply(seq, rtt); }
+                }
+            }
+        }
+
+        seq = seq + 1;
+        if (seq < count) { platform_sleep_ms(interval_ms); }
+    }
+
+    output_summary(s);
+    platform_close(fd);
+
+    if (stats_recv(s) > 0) { return 0; }
+    return 1;
+}

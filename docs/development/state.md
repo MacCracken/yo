@@ -10,23 +10,30 @@
 
 | Field | Value |
 |---|---|
-| Current version | **0.1.0** (scaffold) |
-| Status | Pre-MVP — kernel ICMP syscall surface pending |
-| Build size | ~69 KB (CLI + ICMP framing + IPv4 parser + stats + output, pre-DCE) |
+| Current version | **0.1.0** (scaffold tag); unreleased Linux MVP on `main` |
+| Status | **Linux MVP working** — real ICMP probes via SOCK_DGRAM. AGNOS backend pending kernel surface. |
+| Build size | ~70 KB (full Linux MVP, pre-DCE) |
 | Cyrius pin | 6.0.1 |
 | Tests | 87 assertions in `tests/yo.tcyr` covering ICMP framing/checksum + CLI parse + IPv4 parse + RTT stats + output format |
 | Iron-validation host | archaemenid (Beelink SER, AMD) — same machine as the agnosticos iron-burn surface |
 | Family position | First entry in network-tools family |
+| Backends | Linux (working) · AGNOS (planned) · Windows/Apple (post-1.0) |
 
 ## In-flight work
 
-- **ICMP framing module landed** (`src/icmp.cyr`, unreleased): RFC 792 echo packet builder + RFC 1071 checksum + verify. Pure code, fully unit-tested. Models the checksum on `agnos/kernel/core/net.cyr:25` so kernel-side recv-path verification stays byte-identical.
-- **CLI surface landed** (`src/cli.cyr` + `src/main.cyr`, unreleased): full flag inventory per roadmap 0.3.x (`-c -W -i -s -q -v -h` + long forms) wired through `lib/flags.cyr`. `yo <host>` parses cleanly and prints a planned-probe banner; the call site where the kernel ICMP loop will slot is the `_print_planned()` body. yo is the first consumer of `lib/flags.cyr` in the ecosystem.
-- **IPv4 dotted-quad parser landed** (`src/ipv4.cyr`, unreleased): strict parser returning packed u32 matching the kernel's `ip4()` packing. Banner branches on parse result — literals get `addr=0x...`, hostnames get the DNS-pending note.
-- **Stats accumulator landed** (`src/stats.cyr`, unreleased): microsecond integer math (no f64); pure data structure. Wires into the probe loop when the kernel surface lands.
-- **Output formatters landed** (`src/output.cyr`, unreleased): `output_banner`/`output_reply`/`output_timeout`/`output_summary` produce the full README-shaped probe output. Visual smoke confirms byte-identical to the README example. Buf-writing helper `_output_us_as_ms_to_buf` is unit-tested for carry, rounding boundary, zero, and large values.
+**Linux MVP shipped (unreleased)** — `yo 127.0.0.1`, `yo 192.168.1.1`, `yo -c 3 8.8.8.8` all produce real RTT measurements. Modules:
 
-Still pending: **0.2.x — Kernel ICMP primitive** in agnos (blocked on r8169 RX-path 5-part bundle iron-validating, Attempt 97 pending). When that surface lands, replace the `_print_planned()` placeholder with the real send/recv/verify loop using the already-tested `icmp_*` helpers.
+- `src/platform.cyr` + `src/platform_linux.cyr` — Linux backend. SOCK_DGRAM ICMP with SOCK_RAW fallback. Raw syscalls (`sendto=44`, `recvfrom=45`, `clock_gettime=228`, `nanosleep=35`, `socket=41`, `close=3`, `setsockopt=54`).
+- `src/probe.cyr` — probe loop. Per-packet send/recv with SO_RCVTIMEO; sleep between iterations; per-packet output + summary.
+- `src/icmp.cyr` — RFC 792 framing + RFC 1071 checksum. Already wired through the probe loop. Will stay byte-identical for the AGNOS backend.
+- `src/cli.cyr` — flag inventory. First consumer of `lib/flags.cyr` in the ecosystem.
+- `src/ipv4.cyr` — strict dotted-quad parser. Matches `agnos/kernel/core/net.cyr:21` `ip4()` packing.
+- `src/stats.cyr` + `src/output.cyr` — RTT accumulator + README-shaped output.
+
+Still pending (not blockers):
+- **Ctrl-C signal handler** — currently Ctrl-C kills mid-loop without summary. Needs `sys_rt_sigaction` plumbing.
+- **DNS resolution** — hostnames print a DNS-pending message. Will roll into yo inline; extraction to `taar` waits for `dig` to grow into a real consumer.
+- **AGNOS backend** (`src/platform_agnos.cyr`) — pending the kernel ICMP surface in agnos (blocked on r8169 RX-path 5-part bundle iron-validating, Attempt 97 pending). Slots in as a sibling to `platform_linux.cyr` with no changes to `probe.cyr`.
 
 ## Dependencies (current — `cyrius.cyml [deps].stdlib`)
 
@@ -46,14 +53,19 @@ string fmt alloc io vec str syscalls assert bench args flags
 - **dig** — DNS resolver. Also triggers `taar` extraction if it arrives first.
 - **taar** — substrate library (network-probe primitives). Per [[project_tools_stable_ideas]] memory: real lib from cycle open given three named consumers in the brainstorm window.
 
-## Kernel coupling
+## Kernel coupling (AGNOS backend only)
 
-`yo` depends on a Cyrius-native ICMP primitive in `agnos/kernel/core/net.cyr` (not POSIX `socket()`). Shape decided when `agnos` opens the cycle that lands the ICMP surface. Two candidate shapes:
+The AGNOS backend (future `src/platform_agnos.cyr`) will depend on a Cyrius-native ICMP primitive in `agnos/kernel/core/net.cyr`. The Linux backend has no AGNOS kernel coupling — it uses POSIX socket() against the host kernel directly.
 
-- **Focused**: `icmp_echo(addr, timeout_ms) → rtt_us` — single-purpose, lowest kernel surface area.
-- **General**: `net_send_raw(payload, len) → handle` + `net_recv_raw(handle, buf, maxlen, timeout) → bytes` — broader surface, shared by `whirl` (HTTP) and `dig` (DNS) too.
+Now that the Linux backend exists, we have a concrete reference for what shape the AGNOS surface needs. The Linux call sites in `src/probe.cyr` use:
 
-Per [[project_agnos_kernel_growth_rules]], the shape is decided by what `yo` ACTUALLY needs, refined when `dig` arrives. Don't pre-design.
+- `platform_icmp_open()` → fd (or sovereign handle)
+- `platform_icmp_send_to(fd, packed_addr, pkt, pkt_len)` → bytes_sent
+- `platform_icmp_recv(fd, buf, maxlen)` → bytes_received (with SO_RCVTIMEO equivalent for the timeout)
+- `platform_set_recv_timeout_ms(fd, ms)`
+- `platform_now_us()` and `platform_sleep_ms(ms)`
+
+The AGNOS shape can match this 1:1, OR the kernel can offer the more focused `icmp_echo(addr, timeout_ms) → rtt_us` — at which point platform_agnos.cyr collapses `_send_to + _recv` into a single call internally. Per [[project_agnos_kernel_growth_rules]], the shape is decided when AGNOS opens the cycle; the Linux reference doesn't dictate it.
 
 ## Carry-forward (dependent on other repos)
 

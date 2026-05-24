@@ -20,7 +20,13 @@
 
 ## Goal
 
-Own the **`ping` surface** in the AGNOS network-tools family: ICMP echo probes against IPv4 / IPv6 hosts, RTT measurement, packet-loss accounting. Cyrius-native, no POSIX `socket()` — consumes the kernel's sovereign `icmp_echo` / `net_send_raw` + `net_recv_raw` primitives per the kernel-grows-for-native-workloads rule.
+Own the **`ping` surface** in the AGNOS network-tools family: ICMP echo probes against IPv4 / IPv6 hosts, RTT measurement, packet-loss accounting. Cyrius-native, **per-backend sovereignty**:
+
+- **Linux backend** (`src/platform_linux.cyr`) — POSIX `socket()` pragmatic path. Ships today.
+- **AGNOS backend** (`src/platform_agnos.cyr`, future) — sovereign `icmp_echo` / `net_send_raw` + `net_recv_raw` primitives per the kernel-grows-for-native-workloads rule. Slots in when the agnos surface lands.
+- **Windows / Apple** — post-1.0.
+
+Substrate library `taar` extracts only when a second consumer (`dig` / `whirl`) drives the abstraction. Until then, everything yo needs lives inline in `src/`.
 
 First entry in the **network-tools family** (English-wordplay / trickster lane). Sibling tools — `whirl` (curl/wget) and `dig` (DNS) — share the **taar** substrate library (Hindi तार, *wire/connection*); per the brainstorm-window pattern the three-consumer surface justifies `taar` as a real lib from network-tools cycle open, not a private-in-yo extraction-on-second-consumer.
 

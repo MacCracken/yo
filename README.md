@@ -18,9 +18,18 @@ yo 192.168.1.1 — 64 bytes
 
 Same shape as `ping`, Cyrius-native end to end:
 
-- No POSIX `socket()` — kernel exposes a sovereign `icmp_echo` / `net_send_raw` + `net_recv_raw` pair per the [AGNOS kernel-growth posture](https://github.com/MacCracken/agnosticos/blob/main/docs/development/state.md).
+- Per-backend sovereignty: the **Linux backend** uses POSIX `socket()` pragmatically (unprivileged SOCK_DGRAM ICMP with SOCK_RAW fallback). The **AGNOS backend** (future) will use the sovereign `icmp_echo` / `net_send_raw` kernel primitives per the [AGNOS kernel-growth posture](https://github.com/MacCracken/agnosticos/blob/main/docs/development/state.md).
 - No `libc`, no `glibc`, no `musl`. Statically linked against the Cyrius stdlib only.
 - Reads naturally as a verb: `yo google.com`, `yo -c 4 192.168.1.1`, `yo -W 2 router.local`.
+
+## Platforms
+
+| Backend | Status | Notes |
+|---|---|---|
+| **Linux** | working (pre-1.0) | `src/platform_linux.cyr` — unprivileged SOCK_DGRAM ICMP, falls back to SOCK_RAW. Needs the caller's GID to fall inside `/proc/sys/net/ipv4/ping_group_range` for the unprivileged path. |
+| **AGNOS** | planned | will use the sovereign `icmp_echo` / `net_send_raw` syscalls when agnos lands the ICMP surface |
+| **Windows** | post-1.0 | |
+| **Apple** | post-1.0 | |
 
 ## Why use it
 
