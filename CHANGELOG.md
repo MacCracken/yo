@@ -4,6 +4,29 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-05-23
+
+IPv6 polish. AAAA DNS lookup, `ip6.arpa` PTR reverse-DNS, `-4` / `-6` family-forcing flags, and a canonical RFC 5952 v6-address formatter for banners. `yo dns.google` still defaults to IPv4 (POSIX expectation); `yo -6 dns.google` does the AAAA route. Closes the headline gaps from 0.5.0; scope IDs and IPv4-embedded form remain deferred.
+
+### Added
+- `src/dns.cyr` — `DNS_TYPE_AAAA=28`. `_dns_build_query` gained a `qtype` parameter (callers updated). `dns_resolve_aaaa(host, out16)` issues an AAAA query; `_dns_parse_aaaa_response` walks to the first AAAA record and copies its 16-byte rdata. `_dns_build_reverse_qname_v6(addr16, buf)` emits 32 single-nibble labels least-sig-first per RFC 3596 §2.5 + `ip6.arpa.` (74 bytes total). `_dns_build_ptr_query_v6` + `dns_reverse_resolve_v6` mirror the v4 reverse path. `_dns_nibble_to_hex` helper.
+- `src/cli.cyr` — `-4` / `--ipv4` and `-6` / `--ipv6` bool flags. Registry layout grew 72 B → 88 B (10 slots). New `CLI_ERR_AF_CONFLICT` when both flags are set; main.cyr surfaces `yo: -4 and -6 are mutually exclusive` on stderr and exits 2.
+- `src/main.cyr` — resolution order per target: `ipv4_parse` → `ipv6_parse` → `dns_resolve` (A) → `dns_resolve_aaaa`. `-4` restricts to v4 paths; `-6` restricts to v6 paths. v6 literals now use `dns_reverse_resolve_v6` for banner parens (unless `-n`). AAAA-resolved targets get a canonical formatted address in the banner via `output_ipv6_to_buf`.
+- `src/output.cyr` — `output_ipv6_to_buf(addr16, buf)` renders RFC 5952 canonical text: lowercase, longest zero-run compressed to `::` (≥2 groups only, first-of-equal-length wins), no leading zeros in groups. Buf ≥ 40 bytes. Helpers `_output_nibble_to_buf`, `_output_u16_hex_to_buf`.
+- `tests/yo.tcyr` — 46 new assertions (298 total): CLI `-4`/`-6` (5), v6 reverse qname byte-shape (15), AAAA response parser (5 — happy + rdlen + qid mismatch), `output_ipv6_to_buf` (14 — `::`, `::1`, `1::`, `2001:db8::1`, Google v6, full 8-group, single-zero not compressed).
+
+### Iron-verified
+- `yo dns.google` → A path → `(8.8.8.8)`. `yo -4 dns.google` same.
+- `yo -6 dns.google` → AAAA path → banner `dns.google (2001:4860:4860::8844)`, probe timeout (no global v6 route on archaemenid, same as 0.5.0).
+- `yo ::1` → ip6.arpa PTR → banner `::1 (localhost)`.
+- `yo -6 ::1 <ula-self>` → both v6 literals probe; ULA banner shows `(archaemenid)` from local ip6.arpa PTR.
+- `yo -4 ::1` → resolution fails ("cannot resolve host: ::1") with exit 2.
+- `yo -4 -6 host` → AF_CONFLICT, exit 2.
+
+### Deferred
+- Scope IDs (`fe80::1%eth0`) — needs zone-index lookup against `/sys/class/net` or netlink. Plausible in 0.5.2.
+- IPv4-embedded textual form (`::ffff:1.2.3.4`) — small parser extension. Plausible in 0.5.2.
+
 ## [0.5.0] — 2026-05-23
 
 IPv6 literal probe. `yo ::1`, `yo 2001:db8::1`, and any full eight-group form now run end-to-end ICMPv6 against the Linux backend with the same UX as the v4 path (banner + per-packet hop limit + summary, multi-target dispatch, `-c`/`-W`/`-i`/`-s`/`-q`/`-n` flags). The probe loop dispatches on address family per-target; v4 and v6 targets can mix in a single invocation (`yo ::1 1.1.1.1`).

@@ -53,6 +53,7 @@ fn main() {
     if (rc == CLI_ERR_PARSE)          { _eputs("yo: bad option\n");          cli_print_usage(2); return 2; }
     if (rc == CLI_ERR_NEGATIVE)       { _eputs("yo: negative value\n");      cli_print_usage(2); return 2; }
     if (rc == CLI_ERR_MISSING_TARGET) { _eputs("yo: missing target host\n"); cli_print_usage(2); return 2; }
+    if (rc == CLI_ERR_AF_CONFLICT)    { _eputs("yo: -4 and -6 are mutually exclusive\n"); cli_print_usage(2); return 2; }
 
     # Aggregate exit code across all positional targets:
     #   0 if any target received at least one reply
@@ -60,52 +61,84 @@ fn main() {
     #     socket open failure)
     #   1 otherwise (every target was reachable but lost every packet)
     #
-    # Address-family dispatch per target: try ipv4_parse first, then
-    # ipv6_parse, then dns_resolve (A only). AAAA lookup + -4/-6 flags
-    # land in 0.5.1. Reverse DNS only runs on the v4 path for now;
-    # ip6.arpa PTR lookups also land in 0.5.1.
+    # Address-family dispatch per target. Default resolution order:
+    #   ipv4_parse → ipv6_parse → dns_resolve (A) → dns_resolve_aaaa
+    # `-4` restricts to {ipv4_parse, dns_resolve (A)}. `-6` restricts
+    # to {ipv6_parse, dns_resolve_aaaa}. Reverse DNS path matches the
+    # winning family (in-addr.arpa for v4, ip6.arpa for v6).
     var parens_buf = alloc(256);
     var v6buf      = alloc(16);
-    var n_targets = cli_target_count(reg);
-    var any_reply = 0;
-    var any_error = 0;
+    var v6resolved = alloc(16);
+    var force_v4   = cli_ipv4(reg);
+    var force_v6   = cli_ipv6(reg);
+    var numeric    = cli_numeric(reg);
+    var n_targets  = cli_target_count(reg);
+    var any_reply  = 0;
+    var any_error  = 0;
     var i = 0;
     while (i < n_targets) {
         var target = cli_target_at(reg, i);
         if ((i > 0) && (cli_quiet(reg) == 0)) { _emit_lf(1); }
 
-        var af       = 4;
+        var af       = 0;
         var addr_arg = 0;
         var parens   = 0;
 
-        var v4 = ipv4_parse(target);
-        if (v4 >= 0) {
-            af = 4;
-            addr_arg = v4;
-            if (cli_numeric(reg) == 0) {
-                if (dns_reverse_resolve(v4, parens_buf, 256) > 0) {
-                    parens = parens_buf;
+        # Literal IPv4 — only if not forcing v6.
+        if (force_v6 == 0) {
+            var v4 = ipv4_parse(target);
+            if (v4 >= 0) {
+                af = 4;
+                addr_arg = v4;
+                if (numeric == 0) {
+                    if (dns_reverse_resolve(v4, parens_buf, 256) > 0) {
+                        parens = parens_buf;
+                    }
                 }
             }
-        } else {
+        }
+
+        # Literal IPv6 — only if no v4 hit and not forcing v4.
+        if ((af == 0) && (force_v4 == 0)) {
             if (ipv6_parse(target, v6buf) == 0) {
                 af = 6;
                 addr_arg = v6buf;
-            } else {
-                var v4d = dns_resolve(target);
-                if (v4d < 0) {
-                    _eputs("yo: cannot resolve host: ");
-                    _eputs(target);
-                    _emit_lf(2);
-                    any_error = 1;
-                    i = i + 1;
-                    continue;
+                if (numeric == 0) {
+                    if (dns_reverse_resolve_v6(v6buf, parens_buf, 256) > 0) {
+                        parens = parens_buf;
+                    }
                 }
+            }
+        }
+
+        # DNS A — only if no literal hit and not forcing v6.
+        if ((af == 0) && (force_v6 == 0)) {
+            var v4d = dns_resolve(target);
+            if (v4d >= 0) {
                 af = 4;
                 addr_arg = v4d;
                 output_ipv4_to_buf(v4d, parens_buf);
                 parens = parens_buf;
             }
+        }
+
+        # DNS AAAA — only if everything else failed and not forcing v4.
+        if ((af == 0) && (force_v4 == 0)) {
+            if (dns_resolve_aaaa(target, v6resolved) == 0) {
+                af = 6;
+                addr_arg = v6resolved;
+                output_ipv6_to_buf(v6resolved, parens_buf);
+                parens = parens_buf;
+            }
+        }
+
+        if (af == 0) {
+            _eputs("yo: cannot resolve host: ");
+            _eputs(target);
+            _emit_lf(2);
+            any_error = 1;
+            i = i + 1;
+            continue;
         }
 
         var rrc = probe_run(

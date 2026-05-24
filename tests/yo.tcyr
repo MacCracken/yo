@@ -294,7 +294,7 @@ fn main() {
     test_group("dns _build_query");
 
     var bq[64];
-    var bqlen = _dns_build_query(&bq, 0xABCD, "ex.com");
+    var bqlen = _dns_build_query(&bq, 0xABCD, "ex.com", DNS_TYPE_A);
     # Header(12) + qname("ex.com" = 2+ex+3+com+0 = 8) + qtype/class(4) = 24
     assert_eq(bqlen, 24, "build_query ex.com → 24 bytes");
     assert_eq(load8(&bq + 0),  0xAB, "id hi");
@@ -483,6 +483,85 @@ fn main() {
     var rq3len = _dns_build_reverse_qname(0x01010101, &rq3);
     assert_eq(rq3len, 22, "1.1.1.1 → 22 bytes");
 
+    # ----- dns: reverse v6 qname builder -----
+    test_group("dns _build_reverse_qname_v6");
+
+    # 2001:db8::1 → 1.0.0...0.0.8.b.d.0.1.0.0.2.ip6.arpa
+    # 32 nibble-labels × 2 bytes + 4 ('ip6' label) + 5 ('arpa' label) + 1 = 74 bytes
+    var rv6a[80];
+    var v6addr[16];
+    store8(&v6addr + 0,  0x20); store8(&v6addr + 1,  0x01);
+    store8(&v6addr + 2,  0x0D); store8(&v6addr + 3,  0xB8);
+    var z = 4; while (z < 15) { store8(&v6addr + z, 0); z = z + 1; }
+    store8(&v6addr + 15, 0x01);
+    var rv6alen = _dns_build_reverse_qname_v6(&v6addr, &rv6a);
+    assert_eq(rv6alen, 74, "v6 PTR qname = 74 bytes");
+    # Lowest-significant nibble first: byte 15 low nibble = 1 ('1')
+    assert_eq(load8(&rv6a + 0), 1,   "nibble[0] label len = 1");
+    assert_eq(load8(&rv6a + 1), 49,  "nibble[0] = '1' (0x31)");
+    # Then byte 15 high nibble = 0 ('0')
+    assert_eq(load8(&rv6a + 3), 48,  "nibble[1] = '0'");
+    # Bytes 14..4 are all zero → 22 zero-nibble labels of "0"
+    # Then byte 3 low nibble = 8 ('8'), high = b ('b')
+    assert_eq(load8(&rv6a + 49), 56,  "nibble[24] = '8' (byte 3 lo)");
+    assert_eq(load8(&rv6a + 51), 98,  "nibble[25] = 'b' (byte 3 hi)");
+    # Byte 2: low = d, high = 0
+    assert_eq(load8(&rv6a + 53), 100, "nibble[26] = 'd'");
+    # Byte 1: low = 1, high = 0
+    assert_eq(load8(&rv6a + 57), 49,  "nibble[28] = '1'");
+    # Byte 0 (0x20): low = 0, high = 2
+    assert_eq(load8(&rv6a + 61), 48,  "nibble[30] = '0' (byte 0 lo)");
+    assert_eq(load8(&rv6a + 63), 50,  "nibble[31] = '2' (byte 0 hi)");
+    # ip6.arpa labels at off 64
+    assert_eq(load8(&rv6a + 64), 3,   "ip6 label len = 3");
+    assert_eq(load8(&rv6a + 65), 105, "'i'");
+    assert_eq(load8(&rv6a + 66), 112, "'p'");
+    assert_eq(load8(&rv6a + 67), 54,  "'6'");
+    assert_eq(load8(&rv6a + 68), 4,   "arpa label len = 4");
+    assert_eq(load8(&rv6a + 73), 0,   "terminator at off 73");
+
+    # ----- dns: AAAA response parser -----
+    test_group("dns _parse_aaaa_response");
+
+    # Build a synthetic AAAA response: 1 question + 1 AAAA answer.
+    var arsp[80];
+    store8(&arsp + 0,  0xBE); store8(&arsp + 1,  0xEF);
+    store8(&arsp + 2,  0x81); store8(&arsp + 3,  0x80);
+    store8(&arsp + 4,  0);    store8(&arsp + 5,  1);       # QDCOUNT=1
+    store8(&arsp + 6,  0);    store8(&arsp + 7,  1);       # ANCOUNT=1
+    store8(&arsp + 8,  0);    store8(&arsp + 9,  0);
+    store8(&arsp + 10, 0);    store8(&arsp + 11, 0);
+    # Question: x (1 label)
+    store8(&arsp + 12, 1); store8(&arsp + 13, 120);
+    store8(&arsp + 14, 0);
+    store8(&arsp + 15, 0); store8(&arsp + 16, 28);         # QTYPE AAAA
+    store8(&arsp + 17, 0); store8(&arsp + 18, 1);          # QCLASS IN
+    # Answer: ptr to qname, type AAAA, class IN, TTL 60, RDLEN 16, 16 bytes
+    store8(&arsp + 19, 0xC0); store8(&arsp + 20, 0x0C);
+    store8(&arsp + 21, 0); store8(&arsp + 22, 28);         # TYPE AAAA
+    store8(&arsp + 23, 0); store8(&arsp + 24, 1);          # CLASS IN
+    store8(&arsp + 25, 0); store8(&arsp + 26, 0); store8(&arsp + 27, 0); store8(&arsp + 28, 60);
+    store8(&arsp + 29, 0); store8(&arsp + 30, 16);         # RDLEN 16
+    # rdata: 2001:db8::1
+    store8(&arsp + 31, 0x20); store8(&arsp + 32, 0x01);
+    store8(&arsp + 33, 0x0D); store8(&arsp + 34, 0xB8);
+    var zz = 35; while (zz < 46) { store8(&arsp + zz, 0); zz = zz + 1; }
+    store8(&arsp + 46, 0x01);
+
+    var aout[16];
+    assert_eq(_dns_parse_aaaa_response(&arsp, 47, 0xBEEF, &aout), 0, "AAAA parse OK");
+    assert_eq(load8(&aout + 0),  0x20, "AAAA byte 0");
+    assert_eq(load8(&aout + 3),  0xB8, "AAAA byte 3");
+    assert_eq(load8(&aout + 15), 0x01, "AAAA byte 15");
+
+    # Wrong RDLEN (4 bytes instead of 16) rejected.
+    store8(&arsp + 30, 4);
+    assert(_dns_parse_aaaa_response(&arsp, 47, 0xBEEF, &aout) < 0, "rdlen != 16 rejected");
+    store8(&arsp + 30, 16);
+
+    # ID mismatch.
+    assert(_dns_parse_aaaa_response(&arsp, 47, 0x1234, &aout) < 0, "wrong qid rejected");
+
     # ----- dns: decode_name -----
     test_group("dns _decode_name");
 
@@ -569,6 +648,69 @@ fn main() {
     assert_eq(output_ipv4_to_buf(0x00000000, &ib), 7,  "0.0.0.0 → 7 bytes");
     assert_eq(streq(&ib, "0.0.0.0"), 1, "0.0.0.0 string");
 
+    # ----- output: ipv6_to_buf -----
+    test_group("output ipv6_to_buf");
+
+    var ib6[40];
+    var ia[16];
+
+    # ::1 → "::1"
+    var jj = 0; while (jj < 15) { store8(&ia + jj, 0); jj = jj + 1; }
+    store8(&ia + 15, 1);
+    assert_eq(output_ipv6_to_buf(&ia, &ib6), 3, "::1 = 3 bytes");
+    assert_eq(streq(&ib6, "::1"), 1, "::1 cstr");
+
+    # :: → "::"
+    jj = 0; while (jj < 16) { store8(&ia + jj, 0); jj = jj + 1; }
+    assert_eq(output_ipv6_to_buf(&ia, &ib6), 2, ":: = 2 bytes");
+    assert_eq(streq(&ib6, "::"), 1, ":: cstr");
+
+    # 1:: → "1::"
+    jj = 0; while (jj < 16) { store8(&ia + jj, 0); jj = jj + 1; }
+    store8(&ia + 1, 1);
+    assert_eq(output_ipv6_to_buf(&ia, &ib6), 3, "1:: = 3 bytes");
+    assert_eq(streq(&ib6, "1::"), 1, "1:: cstr");
+
+    # 2001:db8::1 → "2001:db8::1"
+    jj = 0; while (jj < 16) { store8(&ia + jj, 0); jj = jj + 1; }
+    store8(&ia + 0, 0x20); store8(&ia + 1, 0x01);
+    store8(&ia + 2, 0x0D); store8(&ia + 3, 0xB8);
+    store8(&ia + 15, 1);
+    assert_eq(output_ipv6_to_buf(&ia, &ib6), 11, "2001:db8::1 = 11 bytes");
+    assert_eq(streq(&ib6, "2001:db8::1"), 1, "2001:db8::1 cstr");
+
+    # 2001:4860:4860::8888 → "2001:4860:4860::8888"
+    jj = 0; while (jj < 16) { store8(&ia + jj, 0); jj = jj + 1; }
+    store8(&ia + 0, 0x20); store8(&ia + 1, 0x01);
+    store8(&ia + 2, 0x48); store8(&ia + 3, 0x60);
+    store8(&ia + 4, 0x48); store8(&ia + 5, 0x60);
+    store8(&ia + 14, 0x88); store8(&ia + 15, 0x88);
+    assert_eq(output_ipv6_to_buf(&ia, &ib6), 20, "google v6 = 20 bytes");
+    assert_eq(streq(&ib6, "2001:4860:4860::8888"), 1, "google v6 cstr");
+
+    # No-compression form (all groups nonzero) round-trips literally.
+    # 1:2:3:4:5:6:7:8 → "1:2:3:4:5:6:7:8"
+    var pidx = 0; var vidx = 1;
+    while (pidx < 8) {
+        store8(&ia + pidx * 2,     0);
+        store8(&ia + pidx * 2 + 1, vidx);
+        vidx = vidx + 1; pidx = pidx + 1;
+    }
+    assert_eq(output_ipv6_to_buf(&ia, &ib6), 15, "1..8 = 15 bytes");
+    assert_eq(streq(&ib6, "1:2:3:4:5:6:7:8"), 1, "1..8 cstr");
+
+    # Single zero group should NOT be compressed (RFC 5952 §4.2.2).
+    # 1:0:1:1:1:1:1:1 → "1:0:1:1:1:1:1:1"
+    pidx = 0;
+    while (pidx < 8) {
+        store8(&ia + pidx * 2, 0);
+        store8(&ia + pidx * 2 + 1, 1);
+        pidx = pidx + 1;
+    }
+    store8(&ia + 3, 0);            # group 1 low byte → group 1 = 0
+    assert_eq(output_ipv6_to_buf(&ia, &ib6), 15, "single zero kept = 15 bytes");
+    assert_eq(streq(&ib6, "1:0:1:1:1:1:1:1"), 1, "single zero not compressed");
+
     # ----- CLI: -n / --numeric -----
     test_group("cli numeric flag");
 
@@ -586,6 +728,34 @@ fn main() {
     var av_nd = _mk_argv("yo", "host", 0, 0, 0, 0, 0, 0);
     cli_parse_argv(reg_nd, 2, av_nd);
     assert_eq(cli_numeric(reg_nd), 0, "numeric off by default");
+
+    # ----- CLI: -4 / -6 flags -----
+    test_group("cli -4 / -6 flags");
+
+    var reg_4 = cli_new();
+    var av_4 = _mk_argv("yo", "-4", "host", 0, 0, 0, 0, 0);
+    assert_eq(cli_parse_argv(reg_4, 3, av_4), CLI_OK, "-4 parses");
+    assert_eq(cli_ipv4(reg_4), 1, "-4 sets ipv4");
+    assert_eq(cli_ipv6(reg_4), 0, "-4 leaves ipv6 off");
+
+    var reg_6 = cli_new();
+    var av_6 = _mk_argv("yo", "-6", "host", 0, 0, 0, 0, 0);
+    assert_eq(cli_parse_argv(reg_6, 3, av_6), CLI_OK, "-6 parses");
+    assert_eq(cli_ipv6(reg_6), 1, "-6 sets ipv6");
+
+    var reg_l4 = cli_new();
+    var av_l4 = _mk_argv("yo", "--ipv4", "host", 0, 0, 0, 0, 0);
+    assert_eq(cli_parse_argv(reg_l4, 3, av_l4), CLI_OK, "--ipv4 parses");
+    assert_eq(cli_ipv4(reg_l4), 1, "--ipv4 sets ipv4");
+
+    var reg_l6 = cli_new();
+    var av_l6 = _mk_argv("yo", "--ipv6", "host", 0, 0, 0, 0, 0);
+    assert_eq(cli_parse_argv(reg_l6, 3, av_l6), CLI_OK, "--ipv6 parses");
+    assert_eq(cli_ipv6(reg_l6), 1, "--ipv6 sets ipv6");
+
+    var reg_x = cli_new();
+    var av_x = _mk_argv("yo", "-4", "-6", "host", 0, 0, 0, 0);
+    assert_eq(cli_parse_argv(reg_x, 4, av_x), CLI_ERR_AF_CONFLICT, "-4 + -6 → AF_CONFLICT");
 
     # ----- CLI: multiple targets -----
     test_group("cli multiple targets");

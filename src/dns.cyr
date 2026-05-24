@@ -32,6 +32,7 @@ var DNS_PORT          = 53;
 var DNS_HEADER_LEN    = 12;
 var DNS_TYPE_A        = 1;
 var DNS_TYPE_PTR      = 12;
+var DNS_TYPE_AAAA     = 28;       # RFC 3596 §2.1
 var DNS_CLASS_IN      = 1;
 var DNS_FALLBACK_NS   = 0x01010101;   # 1.1.1.1 — when /etc/resolv.conf is missing/empty.
 var DNS_TIMEOUT_MS    = 2000;
@@ -90,10 +91,11 @@ fn _dns_encode_qname(host, buf): i64 {
     return DNS_FAIL;
 }
 
-# Build a full DNS query for host's A record. Caller-owned buf must
-# hold at least 12 + qname_len + 4 bytes (worst case ~270 B). Returns
-# bytes written, or DNS_FAIL if the qname doesn't encode.
-fn _dns_build_query(buf, qid, host): i64 {
+# Build a full DNS query for host with the given QTYPE (A or AAAA).
+# Caller-owned buf must hold at least 12 + qname_len + 4 bytes (worst
+# case ~270 B). Returns bytes written, or DNS_FAIL if the qname doesn't
+# encode.
+fn _dns_build_query(buf, qid, host, qtype): i64 {
     store8(buf,     (qid >> 8) & 0xFF);
     store8(buf + 1, qid & 0xFF);
     store8(buf + 2, 0x01);                      # flags hi: RD=1
@@ -105,7 +107,8 @@ fn _dns_build_query(buf, qid, host): i64 {
     var qn = _dns_encode_qname(host, buf + DNS_HEADER_LEN);
     if (qn < 0) { return DNS_FAIL; }
     var off = DNS_HEADER_LEN + qn;
-    store8(buf + off,     0); store8(buf + off + 1, DNS_TYPE_A);
+    store8(buf + off,     (qtype >> 8) & 0xFF);
+    store8(buf + off + 1, qtype & 0xFF);
     store8(buf + off + 2, 0); store8(buf + off + 3, DNS_CLASS_IN);
     return off + 4;
 }
@@ -331,6 +334,42 @@ fn _dns_build_reverse_qname(packed_addr, buf): i64 {
     return bi;
 }
 
+# Build a PTR-query QNAME for the given packed IPv6 (16 bytes network
+# order, as produced by ipv6_parse). Per RFC 3596 §2.5, the address is
+# represented as a sequence of 32 single-nibble labels, emitted least-
+# significant first, followed by `ip6.arpa.`. For 2001:db8::1 the result
+# is `1.0...0.0.8.b.d.0.1.0.0.2.ip6.arpa.` (74 bytes: 32 × 2-byte
+# nibble-labels + 4 (`ip6` label) + 5 (`arpa` label) + 1 terminator).
+fn _dns_build_reverse_qname_v6(addr16, buf): i64 {
+    var bi = 0;
+    var i = 15;
+    while (i >= 0) {
+        var byte    = load8(addr16 + i);
+        var lo_nib  = byte & 0xF;
+        var hi_nib  = (byte >> 4) & 0xF;
+        # low nibble first (least-significant), then high nibble
+        store8(buf + bi,     1);
+        store8(buf + bi + 1, _dns_nibble_to_hex(lo_nib));
+        bi = bi + 2;
+        store8(buf + bi,     1);
+        store8(buf + bi + 1, _dns_nibble_to_hex(hi_nib));
+        bi = bi + 2;
+        i = i - 1;
+    }
+    store8(buf + bi, 3);                 bi = bi + 1;
+    memcpy(buf + bi, "ip6", 3);          bi = bi + 3;
+    store8(buf + bi, 4);                 bi = bi + 1;
+    memcpy(buf + bi, "arpa", 4);         bi = bi + 4;
+    store8(buf + bi, 0);                 bi = bi + 1;
+    return bi;
+}
+
+# 0..15 → lowercase hex ASCII. Helper for _dns_build_reverse_qname_v6.
+fn _dns_nibble_to_hex(n): i64 {
+    if (n < 10) { return 48 + n; }       # '0'..'9'
+    return 87 + n;                        # 'a'..'f'  (87 = 'a' - 10)
+}
+
 # Build a full PTR query message for the given packed IPv4. Returns
 # bytes written. Layout matches _dns_build_query except QTYPE = PTR.
 fn _dns_build_ptr_query(buf, qid, packed_addr): i64 {
@@ -361,7 +400,7 @@ fn dns_resolve(host): i64 {
 
     var query = alloc(DNS_MAX_MSG);
     var qid = platform_now_us() & 0xFFFF;
-    var qlen = _dns_build_query(query, qid, host);
+    var qlen = _dns_build_query(query, qid, host, DNS_TYPE_A);
     if (qlen < 0) { platform_close(fd); return DNS_FAIL; }
 
     var resp = alloc(DNS_MAX_MSG);
@@ -381,6 +420,70 @@ fn dns_resolve(host): i64 {
     return DNS_FAIL;
 }
 
+# Parse a DNS response and copy the first AAAA record's 16-byte rdata
+# into out (network byte order, same shape as ipv6_parse output).
+# Returns 0 on success, DNS_FAIL on any error.
+fn _dns_parse_aaaa_response(buf, len, expected_qid, out): i64 {
+    var rdata = _dns_walk_to_type(buf, len, expected_qid, DNS_TYPE_AAAA);
+    if (rdata < 0) { return DNS_FAIL; }
+    var rdlen = (load8(buf + rdata - 2) << 8) | load8(buf + rdata - 1);
+    if (rdlen != 16) { return DNS_FAIL; }
+    memcpy(out, buf + rdata, 16);
+    return 0;
+}
+
+# Resolve a hostname to a packed IPv6 address via DNS AAAA query.
+# Writes the 16 packed network-order bytes into out. Returns 0 on
+# success, DNS_FAIL on any failure (timeout × DNS_MAX_ATTEMPTS,
+# malformed response, NXDOMAIN, no AAAA record).
+fn dns_resolve_aaaa(host, out): i64 {
+    var ns = _dns_choose_nameserver();
+    var fd = platform_udp_open();
+    if (fd < 0) { return DNS_FAIL; }
+    platform_set_recv_timeout_ms(fd, DNS_TIMEOUT_MS);
+
+    var query = alloc(DNS_MAX_MSG);
+    var qid = platform_now_us() & 0xFFFF;
+    var qlen = _dns_build_query(query, qid, host, DNS_TYPE_AAAA);
+    if (qlen < 0) { platform_close(fd); return DNS_FAIL; }
+
+    var resp = alloc(DNS_MAX_MSG);
+    var attempt = 0;
+    while (attempt < DNS_MAX_ATTEMPTS) {
+        var sent = platform_udp_send_to(fd, ns, DNS_PORT, query, qlen);
+        if (sent > 0) {
+            var n = platform_udp_recv(fd, resp, DNS_MAX_MSG);
+            if (n > 0) {
+                if (_dns_parse_aaaa_response(resp, n, qid, out) == 0) {
+                    platform_close(fd);
+                    return 0;
+                }
+            }
+        }
+        attempt = attempt + 1;
+    }
+    platform_close(fd);
+    return DNS_FAIL;
+}
+
+# Build a full PTR query message for the given packed IPv6 (16 bytes,
+# network order). QTYPE = PTR, same shape as the v4 builder.
+fn _dns_build_ptr_query_v6(buf, qid, addr16): i64 {
+    store8(buf,     (qid >> 8) & 0xFF);
+    store8(buf + 1, qid & 0xFF);
+    store8(buf + 2, 0x01);
+    store8(buf + 3, 0x00);
+    store8(buf + 4, 0); store8(buf + 5, 1);
+    store8(buf + 6, 0); store8(buf + 7, 0);
+    store8(buf + 8, 0); store8(buf + 9, 0);
+    store8(buf + 10, 0); store8(buf + 11, 0);
+    var qn = _dns_build_reverse_qname_v6(addr16, buf + DNS_HEADER_LEN);
+    var off = DNS_HEADER_LEN + qn;
+    store8(buf + off,     0); store8(buf + off + 1, DNS_TYPE_PTR);
+    store8(buf + off + 2, 0); store8(buf + off + 3, DNS_CLASS_IN);
+    return off + 4;
+}
+
 # Reverse-resolve a packed IPv4 to a hostname via PTR query. Writes the
 # NUL-terminated name into out and returns its length (no NUL), or
 # DNS_FAIL on any failure. Uses a shorter timeout / fewer attempts than
@@ -395,6 +498,36 @@ fn dns_reverse_resolve(packed_addr, out, out_cap): i64 {
     var query = alloc(DNS_MAX_MSG);
     var qid = platform_now_us() & 0xFFFF;
     var qlen = _dns_build_ptr_query(query, qid, packed_addr);
+
+    var resp = alloc(DNS_MAX_MSG);
+    var attempt = 0;
+    while (attempt < DNS_REV_MAX_ATTEMPTS) {
+        var sent = platform_udp_send_to(fd, ns, DNS_PORT, query, qlen);
+        if (sent > 0) {
+            var n = platform_udp_recv(fd, resp, DNS_MAX_MSG);
+            if (n > 0) {
+                var nm = _dns_parse_ptr_response(resp, n, qid, out, out_cap);
+                if (nm > 0) { platform_close(fd); return nm; }
+            }
+        }
+        attempt = attempt + 1;
+    }
+    platform_close(fd);
+    return DNS_FAIL;
+}
+
+# Reverse-resolve a packed IPv6 to a hostname via PTR query against the
+# `ip6.arpa.` zone. Same shape as the v4 variant — short timeout, single
+# attempt, NXDOMAIN returns DNS_FAIL.
+fn dns_reverse_resolve_v6(addr16, out, out_cap): i64 {
+    var ns = _dns_choose_nameserver();
+    var fd = platform_udp_open();
+    if (fd < 0) { return DNS_FAIL; }
+    platform_set_recv_timeout_ms(fd, DNS_REV_TIMEOUT_MS);
+
+    var query = alloc(DNS_MAX_MSG);
+    var qid = platform_now_us() & 0xFFFF;
+    var qlen = _dns_build_ptr_query_v6(query, qid, addr16);
 
     var resp = alloc(DNS_MAX_MSG);
     var attempt = 0;

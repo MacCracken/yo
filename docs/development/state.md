@@ -2,7 +2,7 @@
 
 > **⚠ NOT A LOG.** Live state with pointers — current truth only. Per-release history → [`../../CHANGELOG.md`](../../CHANGELOG.md). Milestone path → [`roadmap.md`](roadmap.md).
 >
-> **Last refresh**: 2026-05-23 (0.5.0 cut — IPv6 literal probe).
+> **Last refresh**: 2026-05-23 (0.5.1 cut — AAAA / ip6.arpa / -4-6).
 
 ---
 
@@ -10,18 +10,28 @@
 
 | Field | Value |
 |---|---|
-| Current version | **0.5.0** — IPv6 literal probe (opens the 0.5.x band) |
-| Status | **Linux MVP at POSIX-ping output parity for v4 + v6 literals** — `yo ::1 1.1.1.1 fd81::…` runs mixed-family sequential probes with hop limit / TTL on each reply line. AGNOS backend pending kernel surface; 0.5.1 will add AAAA + IPv6 reverse DNS + `-4` / `-6`. |
-| Build size | ~96 KB (Linux MVP + DNS + multi-target + TTL/hoplimit + IPv6 literal, pre-DCE; 288 unreachable fns in main, ~310 in tests) |
+| Current version | **0.5.1** — AAAA + ip6.arpa + `-4`/`-6` (second 0.5.x item) |
+| Status | **Linux MVP at POSIX-ping output parity for v4 + v6, literals + hostnames** — `yo dns.google` (A default), `yo -6 dns.google` (AAAA), `yo ::1` (ip6.arpa PTR → `(localhost)`), `yo <ula>` (ip6.arpa PTR → `(archaemenid)`). AGNOS backend pending kernel surface. Scope IDs + IPv4-embedded textual form still deferred to 0.5.2. |
+| Build size | ~96 KB (Linux MVP + v4/v6 DNS forward+reverse + multi-target + TTL/hoplimit + canonical v6 banner, pre-DCE; 288 unreachable fns in main, ~310 in tests) |
 | Cyrius pin | 6.0.1 |
-| Tests | 252 assertions in `tests/yo.tcyr` — ICMP/ICMPv6 framing + CLI parse + IPv4/IPv6 parsers + RTT stats + output format + DNS forward+reverse (A/PTR) + cmsg TTL + cmsg hop-limit walker (covered indirectly via the shared cmsg shape — same algorithm as v4) |
+| Tests | 298 assertions in `tests/yo.tcyr` — ICMP/ICMPv6 framing + CLI parse (incl. `-4`/`-6` + conflict) + IPv4/IPv6 parsers + RTT stats + output format (v4 + v6 RFC 5952 canonical) + DNS forward (A, AAAA) + reverse (in-addr.arpa, ip6.arpa) + cmsg TTL/hop-limit walker |
 | Iron-validation host | archaemenid (Beelink SER, AMD) — same machine as the agnosticos iron-burn surface |
 | Family position | First entry in network-tools family |
 | Backends | Linux (working) · AGNOS (planned) · Windows/Apple (post-1.0) |
 
 ## In-flight work
 
-**0.5.0 IPv6 literal probe landed** — `yo ::1`, `yo 2001:db8::1`, any full eight-group form now run end-to-end against the Linux backend with the same UX as the v4 path. Address family is dispatched per-target so a single invocation can mix v4 and v6 (`yo ::1 1.1.1.1`). On AF_INET6 SOCK_DGRAM ICMPv6 the kernel computes the outbound checksum (we enable `IPV6_CHECKSUM` with offset=2) and surfaces the inbound hop limit via cmsg (we enable `IPV6_RECVHOPLIMIT`). Modules added/touched in 0.5.0:
+**0.5.1 IPv6 polish landed** — AAAA DNS lookup, `ip6.arpa` PTR reverse-DNS, `-4` / `-6` family-forcing flags, RFC 5952 canonical v6 banner formatter. `yo dns.google` defaults to A (POSIX expectation); `yo -6 dns.google` resolves AAAA and banners `dns.google (2001:4860:4860::8844)` even though probing then times out for lack of global v6 route. `yo ::1` banners `::1 (localhost)` via ip6.arpa. Modules touched in 0.5.1:
+
+- `src/dns.cyr` — `DNS_TYPE_AAAA=28`. `_dns_build_query` takes a `qtype` arg. New `dns_resolve_aaaa`, `_dns_parse_aaaa_response`, `_dns_build_reverse_qname_v6` (32 nibble labels + `ip6.arpa.`), `_dns_build_ptr_query_v6`, `dns_reverse_resolve_v6`, `_dns_nibble_to_hex`.
+- `src/cli.cyr` — `-4`/`--ipv4` and `-6`/`--ipv6` bool flags; registry 72 B → 88 B; new `CLI_ERR_AF_CONFLICT`.
+- `src/main.cyr` — dispatch is now `ipv4_parse` → `ipv6_parse` → `dns_resolve(A)` → `dns_resolve_aaaa`, restricted by `-4`/`-6`. v6 reverse DNS hooked in. AAAA banner uses the canonical formatter.
+- `src/output.cyr` — `output_ipv6_to_buf` (RFC 5952), helpers `_output_nibble_to_buf` / `_output_u16_hex_to_buf`.
+- `tests/yo.tcyr` — 46 new assertions (298 total) across CLI `-4`/`-6`, v6 reverse qname, AAAA parser, v6 canonical banner.
+
+**Iron-verified**: see 0.5.1 CHANGELOG entry for the full smoke matrix. Global IPv6 still unreachable from archaemenid (no `2000::/3` route — also confirmed by system `ping -6`).
+
+**0.5.0 IPv6 literal probe** (carryover) — `yo ::1`, `yo 2001:db8::1`, any full eight-group form now run end-to-end against the Linux backend with the same UX as the v4 path. Address family is dispatched per-target so a single invocation can mix v4 and v6 (`yo ::1 1.1.1.1`). On AF_INET6 SOCK_DGRAM ICMPv6 the kernel computes the outbound checksum (we enable `IPV6_CHECKSUM` with offset=2) and surfaces the inbound hop limit via cmsg (we enable `IPV6_RECVHOPLIMIT`). Modules from 0.5.0:
 
 - `src/ipv6.cyr` — new file. Strict RFC 4291 colon-hex parser, output 16 bytes network-order. Single `::`, 1-4 hex digits per group, case-insensitive. Rejects scope IDs and IPv4-embedded textual form (deferred to 0.5.1).
 - `src/icmp.cyr` — added `ICMPV6_ECHO_REQUEST=128` / `_REPLY=129` + `icmp6_build_echo_request` (wire shape identical to v4, checksum left zero for kernel fill).
@@ -65,7 +75,7 @@
 - `src/ipv4.cyr` — strict dotted-quad parser. Matches `agnos/kernel/core/net.cyr:21` `ip4()` packing.
 - `src/stats.cyr` + `src/output.cyr` — RTT accumulator + README-shaped output.
 
-**0.5.x band opened with 0.5.0**. Next point release **0.5.1** picks up the IPv6 polish: AAAA DNS lookup (so hostnames can resolve to IPv6), `ip6.arpa` PTR reverse-DNS, `-4` / `-6` flags for hostname family forcing, scope IDs (`fe80::1%eth0`), and IPv4-embedded textual form (`::ffff:1.2.3.4`). After that: **0.6.x AGNOS backend** — needs a sovereign equivalent of `platform_icmp_recv_ext` / `platform_icmp6_recv_ext` (cmsg-or-equivalent surface for TTL/hop-limit). See [`roadmap.md`](roadmap.md) for the full path to 1.0.
+**0.5.x band substantially complete with 0.5.1** — POSIX-ping output parity for v4 + v6, both literals and hostnames, both directions of DNS, with `-4`/`-6` family forcing. Remaining 0.5.x tail items (scope IDs, IPv4-embedded textual form) can land as 0.5.2 when needed, but they don't block the AGNOS work. Next milestone: **0.6.x AGNOS backend** — needs a sovereign equivalent of `platform_icmp_recv_ext` / `platform_icmp6_recv_ext` (cmsg-or-equivalent surface for TTL/hop-limit) and sovereign UDP for the DNS path. Blocked on agnos kernel ICMP surface (r8169 RX-path 5-part bundle iron-validating, Attempt 97 pending). See [`roadmap.md`](roadmap.md) for the full path to 1.0.
 
 Pending later:
 - **AGNOS backend** (`src/platform_agnos.cyr`) — pending the kernel ICMP surface in agnos (blocked on r8169 RX-path 5-part bundle iron-validating, Attempt 97 pending). Slots in as a sibling to `platform_linux.cyr` with no changes to `probe.cyr`. Will also need a sovereign UDP surface for the AGNOS-side `dns_resolve`.

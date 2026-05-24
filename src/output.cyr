@@ -53,6 +53,104 @@ fn output_ipv4_to_buf(packed, buf): i64 {
     return p;
 }
 
+# Write a 0..15 nibble as a lowercase hex ASCII byte to buf, return 1.
+fn _output_nibble_to_buf(n, buf): i64 {
+    if (n < 10) { store8(buf, 48 + n); }       # '0'..'9'
+    else        { store8(buf, 87 + n); }       # 'a'..'f'  (87 = 'a' - 10)
+    return 1;
+}
+
+# Write a 16-bit value as lowercase hex with NO leading zeros to buf.
+# Returns bytes written (1..4). RFC 5952 §4.1.
+fn _output_u16_hex_to_buf(val, buf): i64 {
+    if (val == 0) { store8(buf, 48); return 1; }
+    var nibs[4];
+    var n = 0;
+    while (val > 0) {
+        store8(&nibs + n, val & 0xF);
+        val = val >> 4;
+        n = n + 1;
+    }
+    var w = 0;
+    while (w < n) {
+        _output_nibble_to_buf(load8(&nibs + n - 1 - w), buf + w);
+        w = w + 1;
+    }
+    return n;
+}
+
+# Render a 16-byte IPv6 address (network order, as produced by
+# ipv6_parse / dns_resolve_aaaa) into buf as an RFC 5952 canonical
+# cstring: lowercase, no leading zeros in groups, longest run of two
+# or more zero groups compressed to `::`. Buf must hold ≥ 40 bytes
+# (max plain form `ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff` = 39 + NUL).
+# Returns bytes written, not counting NUL.
+fn output_ipv6_to_buf(addr16, buf): i64 {
+    # Expand to 8 groups (i64 entries) by reading big-endian pairs.
+    var groups[64];
+    var i = 0;
+    while (i < 8) {
+        var hi = load8(addr16 + i * 2);
+        var lo = load8(addr16 + i * 2 + 1);
+        store64(&groups + i * 8, (hi << 8) | lo);
+        i = i + 1;
+    }
+
+    # Find longest run of zero groups (only used if length ≥ 2 per §4.2.2).
+    var best_start = 0 - 1;
+    var best_len   = 0;
+    var k = 0;
+    while (k < 8) {
+        if (load64(&groups + k * 8) == 0) {
+            var j = k;
+            while (j < 8) {
+                if (load64(&groups + j * 8) != 0) { break; }
+                j = j + 1;
+            }
+            var run = j - k;
+            if ((run >= 2) && (run > best_len)) {
+                best_len   = run;
+                best_start = k;
+            }
+            k = j;
+        } else {
+            k = k + 1;
+        }
+    }
+
+    var p = 0;
+    if (best_start >= 0) {
+        # Pre-:: groups (joined by ':' between them; no trailing ':').
+        var g = 0;
+        while (g < best_start) {
+            if (g > 0) { store8(buf + p, 58); p = p + 1; }
+            p = p + _output_u16_hex_to_buf(load64(&groups + g * 8), buf + p);
+            g = g + 1;
+        }
+        # The "::" literal — both colons live here; the joins below
+        # do NOT emit an extra ':' against this boundary.
+        store8(buf + p, 58); p = p + 1;
+        store8(buf + p, 58); p = p + 1;
+        # Post-:: groups (joined by ':' between them; no leading ':').
+        var post_start = best_start + best_len;
+        var h = post_start;
+        while (h < 8) {
+            if (h > post_start) { store8(buf + p, 58); p = p + 1; }
+            p = p + _output_u16_hex_to_buf(load64(&groups + h * 8), buf + p);
+            h = h + 1;
+        }
+    } else {
+        var g = 0;
+        while (g < 8) {
+            if (g > 0) { store8(buf + p, 58); p = p + 1; }
+            p = p + _output_u16_hex_to_buf(load64(&groups + g * 8), buf + p);
+            g = g + 1;
+        }
+    }
+    store8(buf + p, 0);
+    return p;
+}
+
 # Print the run-time banner. `parens` is a cstr to display in
 # parentheses after the target, or 0 to suppress. Shape:
 #   yo 8.8.8.8 — 56 bytes                     (literal IP, no PTR / numeric)

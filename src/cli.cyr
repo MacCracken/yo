@@ -13,6 +13,8 @@
 #   -q, --quiet             summary only, no per-packet output
 #   -v, --verbose           per-packet detail
 #   -n, --numeric           skip reverse DNS lookup (literal IP banner only)
+#   -4, --ipv4              force IPv4 (literal v4 or A lookup only)
+#   -6, --ipv6              force IPv6 (literal v6 or AAAA lookup only)
 #
 # Positional: <host> — required unless --help.
 
@@ -27,10 +29,11 @@ enum CliResult {
     CLI_ERR_PARSE           = 2;
     CLI_ERR_MISSING_TARGET  = 3;
     CLI_ERR_NEGATIVE        = 4;
+    CLI_ERR_AF_CONFLICT     = 5;
 }
 
-# Registry layout (72 B): flags context + 8 flag indices.
-var CLI_REG_SIZE = 72;
+# Registry layout (88 B): flags context + 10 flag indices.
+var CLI_REG_SIZE = 88;
 
 fn _cli_reg_ctx(r):       i64 { return load64(r); }
 fn _cli_reg_help(r):      i64 { return load64(r + 8); }
@@ -41,11 +44,13 @@ fn _cli_reg_size(r):      i64 { return load64(r + 40); }
 fn _cli_reg_quiet(r):     i64 { return load64(r + 48); }
 fn _cli_reg_verbose(r):   i64 { return load64(r + 56); }
 fn _cli_reg_numeric(r):   i64 { return load64(r + 64); }
+fn _cli_reg_v4(r):        i64 { return load64(r + 72); }
+fn _cli_reg_v6(r):        i64 { return load64(r + 80); }
 
 # Build a fresh registry: alloc context, flags_new, register every
 # flag, stash the indices. Caller hands the returned ptr to every
 # cli_* function. ASCII short_ch values: h=104, c=99, W=87, i=105,
-# s=115, q=113, v=118, n=110.
+# s=115, q=113, v=118, n=110, '4'=52, '6'=54.
 fn cli_new(): i64 {
     var r = alloc(CLI_REG_SIZE);
     var fs = flags_new();
@@ -58,6 +63,8 @@ fn cli_new(): i64 {
     store64(r + 48, flags_add_bool(fs, 113, "quiet",    0,                       "summary only"));
     store64(r + 56, flags_add_bool(fs, 118, "verbose",  0,                       "per-packet detail"));
     store64(r + 64, flags_add_bool(fs, 110, "numeric",  0,                       "skip reverse DNS lookup"));
+    store64(r + 72, flags_add_bool(fs,  52, "ipv4",     0,                       "force IPv4 (literal v4 / A only)"));
+    store64(r + 80, flags_add_bool(fs,  54, "ipv6",     0,                       "force IPv6 (literal v6 / AAAA only)"));
     return r;
 }
 
@@ -75,6 +82,9 @@ fn cli_parse_argv(reg, argc, argv): i64 {
     if (flags_get_int(fs, _cli_reg_timeout(reg))  < 0) { return CLI_ERR_NEGATIVE; }
     if (flags_get_int(fs, _cli_reg_interval(reg)) < 0) { return CLI_ERR_NEGATIVE; }
     if (flags_get_int(fs, _cli_reg_size(reg))     < 0) { return CLI_ERR_NEGATIVE; }
+    var v4 = flags_get_bool(fs, _cli_reg_v4(reg));
+    var v6 = flags_get_bool(fs, _cli_reg_v6(reg));
+    if ((v4 == 1) && (v6 == 1)) { return CLI_ERR_AF_CONFLICT; }
     if (flags_positional_count(fs) == 0) { return CLI_ERR_MISSING_TARGET; }
     return CLI_OK;
 }
@@ -89,6 +99,8 @@ fn cli_size(reg):        i64 { return flags_get_int (_cli_reg_ctx(reg), _cli_reg
 fn cli_quiet(reg):       i64 { return flags_get_bool(_cli_reg_ctx(reg), _cli_reg_quiet(reg)); }
 fn cli_verbose(reg):     i64 { return flags_get_bool(_cli_reg_ctx(reg), _cli_reg_verbose(reg)); }
 fn cli_numeric(reg):     i64 { return flags_get_bool(_cli_reg_ctx(reg), _cli_reg_numeric(reg)); }
+fn cli_ipv4(reg):        i64 { return flags_get_bool(_cli_reg_ctx(reg), _cli_reg_v4(reg)); }
+fn cli_ipv6(reg):        i64 { return flags_get_bool(_cli_reg_ctx(reg), _cli_reg_v6(reg)); }
 
 # First positional argument = target host. Returns 0 if none.
 fn cli_target(reg): i64 {
@@ -107,7 +119,7 @@ fn cli_target_at(reg, idx): i64 {
 
 # Print "Usage: ..." line to the given fd (1 stdout, 2 stderr).
 fn cli_print_usage(fd): i64 {
-    var u = "Usage: yo [-c count] [-W timeout_ms] [-i interval_ms] [-s size] [-q|-v] [-n] <host> [host ...]\n";
+    var u = "Usage: yo [-c count] [-W timeout_ms] [-i interval_ms] [-s size] [-q|-v] [-n] [-4|-6] <host> [host ...]\n";
     syscall(1, fd, u, strlen(u));
     return 0;
 }
