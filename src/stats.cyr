@@ -1,8 +1,8 @@
-# stats.cyr — RTT accumulator + summary formatter.
+# stats.cyr — RTT accumulator (data only).
 #
-# Pure code. Microseconds internally; conversion to ms-with-2-decimals
-# happens at print time using integer math (no f64 round-trip needed
-# for the kind of precision a ping summary wants).
+# Pure code. Microseconds throughout. Formatting/printing lives in
+# src/output.cyr to keep this module a pure data structure that the
+# probe loop can drive without touching stdout.
 #
 # Layout (40 B):
 #   +0   sent_count : i64
@@ -65,41 +65,4 @@ fn stats_avg_us(s): i64 {
     var recv = load64(s + 8);
     if (recv == 0) { return 0; }
     return load64(s + 32) / recv;
-}
-
-# Print microseconds as ms with 2 decimal places to stdout.
-# Rounding: half-up at the 10-us mark (0.01-ms granularity).
-fn _stats_print_ms(us): i64 {
-    var hus = (us + 5) / 10;     # hundredths of a millisecond, rounded.
-    fmt_int(hus / 100);
-    syscall(1, 1, ".", 1);
-    var frac = hus % 100;
-    if (frac < 10) { syscall(1, 1, "0", 1); }
-    fmt_int(frac);
-    return 0;
-}
-
-fn _stats_puts(s): i64 { syscall(1, 1, s, strlen(s)); return 0; }
-
-# Print the summary block. Shape matches README:
-#   3 sent · 3 received · 0% loss · min/avg/max = 0.39/0.41/0.42 ms
-# When all packets are lost, the min/avg/max suffix is omitted.
-fn stats_print_summary(s): i64 {
-    fmt_int(stats_sent(s));
-    _stats_puts(" sent · ");
-    fmt_int(stats_recv(s));
-    _stats_puts(" received · ");
-    fmt_int(stats_loss_pct(s));
-    _stats_puts("% loss");
-    if (stats_recv(s) > 0) {
-        _stats_puts(" · min/avg/max = ");
-        _stats_print_ms(stats_min_us(s));
-        syscall(1, 1, "/", 1);
-        _stats_print_ms(stats_avg_us(s));
-        syscall(1, 1, "/", 1);
-        _stats_print_ms(stats_max_us(s));
-        _stats_puts(" ms");
-    }
-    syscall(1, 1, "\n", 1);
-    return 0;
 }

@@ -12,9 +12,9 @@
 |---|---|
 | Current version | **0.1.0** (scaffold) |
 | Status | Pre-MVP — kernel ICMP syscall surface pending |
-| Build size | ~69 KB (CLI + ICMP framing + IPv4 parser + stats, pre-DCE) |
+| Build size | ~69 KB (CLI + ICMP framing + IPv4 parser + stats + output, pre-DCE) |
 | Cyrius pin | 6.0.1 |
-| Tests | 79 assertions in `tests/yo.tcyr` covering ICMP framing/checksum + CLI parse + IPv4 parse + RTT stats |
+| Tests | 87 assertions in `tests/yo.tcyr` covering ICMP framing/checksum + CLI parse + IPv4 parse + RTT stats + output format |
 | Iron-validation host | archaemenid (Beelink SER, AMD) — same machine as the agnosticos iron-burn surface |
 | Family position | First entry in network-tools family |
 
@@ -23,7 +23,8 @@
 - **ICMP framing module landed** (`src/icmp.cyr`, unreleased): RFC 792 echo packet builder + RFC 1071 checksum + verify. Pure code, fully unit-tested. Models the checksum on `agnos/kernel/core/net.cyr:25` so kernel-side recv-path verification stays byte-identical.
 - **CLI surface landed** (`src/cli.cyr` + `src/main.cyr`, unreleased): full flag inventory per roadmap 0.3.x (`-c -W -i -s -q -v -h` + long forms) wired through `lib/flags.cyr`. `yo <host>` parses cleanly and prints a planned-probe banner; the call site where the kernel ICMP loop will slot is the `_print_planned()` body. yo is the first consumer of `lib/flags.cyr` in the ecosystem.
 - **IPv4 dotted-quad parser landed** (`src/ipv4.cyr`, unreleased): strict parser returning packed u32 matching the kernel's `ip4()` packing. Banner branches on parse result — literals get `addr=0x...`, hostnames get the DNS-pending note.
-- **Stats accumulator landed** (`src/stats.cyr`, unreleased): microsecond integer math (no f64), with `stats_print_summary` formatting the "N sent · M received · X% loss · min/avg/max = a/b/c ms" block from the README. Wires into the probe loop when the kernel surface lands; not yet called from main (no samples to summarize until then).
+- **Stats accumulator landed** (`src/stats.cyr`, unreleased): microsecond integer math (no f64); pure data structure. Wires into the probe loop when the kernel surface lands.
+- **Output formatters landed** (`src/output.cyr`, unreleased): `output_banner`/`output_reply`/`output_timeout`/`output_summary` produce the full README-shaped probe output. Visual smoke confirms byte-identical to the README example. Buf-writing helper `_output_us_as_ms_to_buf` is unit-tested for carry, rounding boundary, zero, and large values.
 
 Still pending: **0.2.x — Kernel ICMP primitive** in agnos (blocked on r8169 RX-path 5-part bundle iron-validating, Attempt 97 pending). When that surface lands, replace the `_print_planned()` placeholder with the real send/recv/verify loop using the already-tested `icmp_*` helpers.
 

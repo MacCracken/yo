@@ -1,0 +1,90 @@
+# output.cyr — probe-time output formatting.
+#
+# All printed lines live here so the format is one-stop-readable and
+# the buf-writing primitive is unit-testable without stdout capture.
+# Depends on src/stats.cyr for the summary accessor reads.
+#
+# Wire shape (matches README):
+#   yo <target> — <size> bytes        ← output_banner
+#     seq=0  rtt=0.42 ms              ← output_reply
+#     seq=1  timeout                  ← output_timeout
+#   N sent · M received · X% loss · min/avg/max = a/b/c ms   ← output_summary
+
+# Format microseconds as "W.FF" ms into buf. Returns bytes written.
+# Half-up rounding at the 10-us mark (0.01-ms granularity). Buf must
+# hold at least 24 bytes (covers a full i64 us in the worst case
+# plus the dot + two fractional digits).
+fn _output_us_as_ms_to_buf(us, buf): i64 {
+    var hus = (us + 5) / 10;       # hundredths of a millisecond, rounded.
+    var whole = hus / 100;
+    var frac = hus % 100;
+    var pos = fmt_int_buf(whole, buf);
+    store8(buf + pos, 46);          # '.'
+    pos = pos + 1;
+    if (frac < 10) {                # zero-pad fractional part to 2 digits
+        store8(buf + pos, 48);
+        pos = pos + 1;
+    }
+    pos = pos + fmt_int_buf(frac, buf + pos);
+    return pos;
+}
+
+fn _output_print_us_as_ms(us): i64 {
+    var buf[24];
+    var n = _output_us_as_ms_to_buf(us, &buf);
+    syscall(1, 1, &buf, n);
+    return 0;
+}
+
+fn _output_puts(s): i64 { syscall(1, 1, s, strlen(s)); return 0; }
+
+# Print the run-time banner: `yo <target> — <size> bytes\n`
+fn output_banner(target, size): i64 {
+    _output_puts("yo ");
+    _output_puts(target);
+    _output_puts(" — ");
+    fmt_int(size);
+    _output_puts(" bytes\n");
+    return 0;
+}
+
+# Print one reply line: `  seq=N  rtt=X.XX ms\n`
+fn output_reply(seq, rtt_us): i64 {
+    _output_puts("  seq=");
+    fmt_int(seq);
+    _output_puts("  rtt=");
+    _output_print_us_as_ms(rtt_us);
+    _output_puts(" ms\n");
+    return 0;
+}
+
+# Print one timeout line: `  seq=N  timeout\n`
+fn output_timeout(seq): i64 {
+    _output_puts("  seq=");
+    fmt_int(seq);
+    _output_puts("  timeout\n");
+    return 0;
+}
+
+# Print the summary block. Shape matches README:
+#   3 sent · 3 received · 0% loss · min/avg/max = 0.39/0.41/0.42 ms
+# When all packets are lost, the min/avg/max suffix is omitted.
+fn output_summary(s): i64 {
+    fmt_int(stats_sent(s));
+    _output_puts(" sent · ");
+    fmt_int(stats_recv(s));
+    _output_puts(" received · ");
+    fmt_int(stats_loss_pct(s));
+    _output_puts("% loss");
+    if (stats_recv(s) > 0) {
+        _output_puts(" · min/avg/max = ");
+        _output_print_us_as_ms(stats_min_us(s));
+        syscall(1, 1, "/", 1);
+        _output_print_us_as_ms(stats_avg_us(s));
+        syscall(1, 1, "/", 1);
+        _output_print_us_as_ms(stats_max_us(s));
+        _output_puts(" ms");
+    }
+    syscall(1, 1, "\n", 1);
+    return 0;
+}

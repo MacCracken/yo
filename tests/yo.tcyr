@@ -5,6 +5,15 @@ include "src/icmp.cyr"
 include "src/cli.cyr"
 include "src/ipv4.cyr"
 include "src/stats.cyr"
+include "src/output.cyr"
+
+# Format us into a stack buf, NUL-terminate, return the buf pointer
+# so streq can compare against an expected cstring.
+fn _us_fmt(us, buf): i64 {
+    var n = _output_us_as_ms_to_buf(us, buf);
+    store8(buf + n, 0);
+    return buf;
+}
 
 # Build a synthetic argv pointer-array from up to 8 cstring literals.
 # Pass 0 for unused slots; we'll only honor the first `ac` entries.
@@ -210,6 +219,19 @@ fn main() {
     assert_eq(stats_recv(s3),     0,   "all-lost: recv=0");
     assert_eq(stats_loss_pct(s3), 100, "all-lost: 100%");
     assert_eq(stats_avg_us(s3),   0,   "all-lost: avg=0 (no samples)");
+
+    # ----- output: us → ms format -----
+    test_group("output us→ms format");
+
+    var fb[32];
+    assert_eq(streq(_us_fmt(0,       &fb), "0.00"),    1, "0us → 0.00");
+    assert_eq(streq(_us_fmt(5,       &fb), "0.01"),    1, "5us → 0.01 (round up)");
+    assert_eq(streq(_us_fmt(390,     &fb), "0.39"),    1, "390us → 0.39");
+    assert_eq(streq(_us_fmt(395,     &fb), "0.40"),    1, "395us → 0.40 (boundary round)");
+    assert_eq(streq(_us_fmt(410,     &fb), "0.41"),    1, "410us → 0.41");
+    assert_eq(streq(_us_fmt(1234,    &fb), "1.23"),    1, "1234us → 1.23");
+    assert_eq(streq(_us_fmt(9995,    &fb), "10.00"),   1, "9995us → 10.00 (carry)");
+    assert_eq(streq(_us_fmt(1500000, &fb), "1500.00"), 1, "1500000us → 1500.00");
 
     return assert_summary();
 }
