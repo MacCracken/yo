@@ -2,7 +2,7 @@
 
 > **⚠ NOT A LOG.** Live state with pointers — current truth only. Per-release history → [`../../CHANGELOG.md`](../../CHANGELOG.md). Milestone path → [`roadmap.md`](roadmap.md).
 >
-> **Last refresh**: 2026-05-23 (0.4.0 cut — DNS resolution).
+> **Last refresh**: 2026-05-23 (0.4.1 cut — reverse DNS).
 
 ---
 
@@ -10,22 +10,27 @@
 
 | Field | Value |
 |---|---|
-| Current version | **0.4.0** — DNS resolution (first 0.4.x item) |
-| Status | **Linux MVP + DNS working** — `yo <hostname>` resolves and probes end-to-end. AGNOS backend pending kernel surface. |
-| Build size | ~92 KB (Linux MVP + DNS, pre-DCE; 286 unreachable fns) |
+| Current version | **0.4.1** — reverse DNS + `-n` flag (second 0.4.x item) |
+| Status | **Linux MVP + DNS (both directions) working** — `yo google.com` and `yo 8.8.8.8` both produce a banner with the symmetric form. AGNOS backend pending kernel surface. |
+| Build size | ~96 KB (Linux MVP + DNS forward+reverse, pre-DCE; 286 unreachable fns in main, 304 in tests) |
 | Cyrius pin | 6.0.1 |
-| Tests | 133 assertions in `tests/yo.tcyr` covering ICMP framing/checksum + CLI parse + IPv4 parse + RTT stats + output format + DNS qname/query/response/resolv.conf |
+| Tests | 169 assertions in `tests/yo.tcyr` — ICMP framing/checksum + CLI parse (incl. `-n`) + IPv4 parse + RTT stats + output format + DNS forward+reverse (qname encoders, query builders, response parsers for A and PTR, name decoder w/ pointer guard, resolv.conf parser) |
 | Iron-validation host | archaemenid (Beelink SER, AMD) — same machine as the agnosticos iron-burn surface |
 | Family position | First entry in network-tools family |
 | Backends | Linux (working) · AGNOS (planned) · Windows/Apple (post-1.0) |
 
 ## In-flight work
 
-**0.4.0 DNS landed** — `yo google.com` → `yo google.com (142.251.214.110) — 56 bytes ...`. Resolver is RFC 1035 A-records only, sends a single UDP query to the first nameserver in `/etc/resolv.conf` (fallback `1.1.1.1`), 2 attempts at 2 s SO_RCVTIMEO. NXDOMAIN exits 2 with `yo: cannot resolve host: <name>`. New modules:
+**0.4.1 reverse DNS landed** — `yo 8.8.8.8` → `yo 8.8.8.8 (dns.google) — 56 bytes ...`. PTR query against `D.C.B.A.in-addr.arpa.` with a shorter 1 s timeout / 1 attempt (most IPs NXDOMAIN; long timeouts would drag probe start). `-n` / `--numeric` flag suppresses the lookup. Modules added since 0.4.0:
 
-- `src/dns.cyr` — QNAME encoder, query builder, response parser (compressed-pointer NAMEs, skips CNAMEs to the first A record), `/etc/resolv.conf` line parser. Self-contained; uses `platform_udp_*` directly per the per-backend sovereignty rule.
-- `src/platform_linux.cyr` — UDP primitives: `platform_udp_open` / `_send_to(fd, addr, port, ...)` / `_recv`, plus `platform_read_file(path, buf, maxlen)` for `/etc/resolv.conf`. `_lx_sockaddr_in` now takes a port arg (network byte order), shared by ICMP (port=0) and UDP send paths.
-- `src/output.cyr` — banner now appends `(a.b.c.d)` when target was DNS-resolved.
+- `src/dns.cyr` — new helpers: `_dns_build_reverse_qname` (octets least-significant-first per RFC 1035 §3.5), `_dns_build_ptr_query`, `_dns_decode_name` (compressed-pointer-aware, 16-jump loop guard), `_dns_parse_ptr_response`. Shared `_dns_walk_to_type` factored out — forward and reverse parsers now share header validation + answer walking.
+- `src/cli.cyr` — `-n` / `--numeric` flag; registry grew 64 B → 72 B.
+- `src/output.cyr` — `output_ipv4_to_buf` formats packed IPv4 as cstr. `output_banner` now takes a `parens` cstr (or 0); main.cyr fills it with the resolved IP for hostnames or the reverse-DNS name for literal IPs.
+
+**0.4.0 forward DNS** (carryover) — `yo <hostname>` resolver: A-records only, single UDP query to the first nameserver in `/etc/resolv.conf` (fallback `1.1.1.1`), 2 attempts at 2 s SO_RCVTIMEO. NXDOMAIN exits 2 with `yo: cannot resolve host: <name>`. Core modules:
+
+- `src/dns.cyr` — `dns_resolve` + qname/query/response primitives + `/etc/resolv.conf` line parser. Self-contained; uses `platform_udp_*` directly per the per-backend sovereignty rule.
+- `src/platform_linux.cyr` — UDP primitives (`platform_udp_open` / `_send_to(fd, addr, port, ...)` / `_recv`) + `platform_read_file`. `_lx_sockaddr_in` takes a port arg shared by ICMP (port=0) and UDP.
 
 **0.3.0 carryover** (still the underlying Linux MVP):
 
@@ -36,7 +41,7 @@
 - `src/ipv4.cyr` — strict dotted-quad parser. Matches `agnos/kernel/core/net.cyr:21` `ip4()` packing.
 - `src/stats.cyr` + `src/output.cyr` — RTT accumulator + README-shaped output.
 
-Next milestones in the **0.4.x band**: reverse DNS lookup (PTR queries — banner gains `(name)` for literal-IP targets), multiple targets (sequential probe runs with combined exit), TTL/hop-limit display (cmsg via `IP_RECVTTL` on SOCK_DGRAM). All Linux-backend work; no platform-layer changes needed. See [`roadmap.md`](roadmap.md) for the full path to 1.0.
+Next milestones in the **0.4.x band**: multiple targets (sequential probe runs with combined exit), TTL/hop-limit display (cmsg via `IP_RECVTTL` on SOCK_DGRAM). Both Linux-backend work; no platform-layer changes needed. See [`roadmap.md`](roadmap.md) for the full path to 1.0.
 
 Pending later:
 - **AGNOS backend** (`src/platform_agnos.cyr`) — pending the kernel ICMP surface in agnos (blocked on r8169 RX-path 5-part bundle iron-validating, Attempt 97 pending). Slots in as a sibling to `platform_linux.cyr` with no changes to `probe.cyr`. Will also need a sovereign UDP surface for the AGNOS-side `dns_resolve`.

@@ -12,6 +12,7 @@
 #   -s, --size     <int>    payload bytes                       (default 56)
 #   -q, --quiet             summary only, no per-packet output
 #   -v, --verbose           per-packet detail
+#   -n, --numeric           skip reverse DNS lookup (literal IP banner only)
 #
 # Positional: <host> — required unless --help.
 
@@ -28,8 +29,8 @@ enum CliResult {
     CLI_ERR_NEGATIVE        = 4;
 }
 
-# Registry layout (64 B): flags context + 7 flag indices.
-var CLI_REG_SIZE = 64;
+# Registry layout (72 B): flags context + 8 flag indices.
+var CLI_REG_SIZE = 72;
 
 fn _cli_reg_ctx(r):       i64 { return load64(r); }
 fn _cli_reg_help(r):      i64 { return load64(r + 8); }
@@ -39,11 +40,12 @@ fn _cli_reg_interval(r):  i64 { return load64(r + 32); }
 fn _cli_reg_size(r):      i64 { return load64(r + 40); }
 fn _cli_reg_quiet(r):     i64 { return load64(r + 48); }
 fn _cli_reg_verbose(r):   i64 { return load64(r + 56); }
+fn _cli_reg_numeric(r):   i64 { return load64(r + 64); }
 
 # Build a fresh registry: alloc context, flags_new, register every
 # flag, stash the indices. Caller hands the returned ptr to every
 # cli_* function. ASCII short_ch values: h=104, c=99, W=87, i=105,
-# s=115, q=113, v=118.
+# s=115, q=113, v=118, n=110.
 fn cli_new(): i64 {
     var r = alloc(CLI_REG_SIZE);
     var fs = flags_new();
@@ -55,6 +57,7 @@ fn cli_new(): i64 {
     store64(r + 40, flags_add_int (fs, 115, "size",     YO_DEFAULT_SIZE,         "payload bytes"));
     store64(r + 48, flags_add_bool(fs, 113, "quiet",    0,                       "summary only"));
     store64(r + 56, flags_add_bool(fs, 118, "verbose",  0,                       "per-packet detail"));
+    store64(r + 64, flags_add_bool(fs, 110, "numeric",  0,                       "skip reverse DNS lookup"));
     return r;
 }
 
@@ -85,6 +88,7 @@ fn cli_interval_ms(reg): i64 { return flags_get_int (_cli_reg_ctx(reg), _cli_reg
 fn cli_size(reg):        i64 { return flags_get_int (_cli_reg_ctx(reg), _cli_reg_size(reg)); }
 fn cli_quiet(reg):       i64 { return flags_get_bool(_cli_reg_ctx(reg), _cli_reg_quiet(reg)); }
 fn cli_verbose(reg):     i64 { return flags_get_bool(_cli_reg_ctx(reg), _cli_reg_verbose(reg)); }
+fn cli_numeric(reg):     i64 { return flags_get_bool(_cli_reg_ctx(reg), _cli_reg_numeric(reg)); }
 
 # First positional argument = target host. Returns 0 if none.
 fn cli_target(reg): i64 {
@@ -93,7 +97,7 @@ fn cli_target(reg): i64 {
 
 # Print "Usage: ..." line to the given fd (1 stdout, 2 stderr).
 fn cli_print_usage(fd): i64 {
-    var u = "Usage: yo [-c count] [-W timeout_ms] [-i interval_ms] [-s size] [-q|-v] <host>\n";
+    var u = "Usage: yo [-c count] [-W timeout_ms] [-i interval_ms] [-s size] [-q|-v] [-n] <host>\n";
     syscall(1, fd, u, strlen(u));
     return 0;
 }

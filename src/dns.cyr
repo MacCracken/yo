@@ -31,12 +31,18 @@ var DNS_FAIL          = 0 - 1;
 var DNS_PORT          = 53;
 var DNS_HEADER_LEN    = 12;
 var DNS_TYPE_A        = 1;
+var DNS_TYPE_PTR      = 12;
 var DNS_CLASS_IN      = 1;
 var DNS_FALLBACK_NS   = 0x01010101;   # 1.1.1.1 — when /etc/resolv.conf is missing/empty.
 var DNS_TIMEOUT_MS    = 2000;
 var DNS_MAX_ATTEMPTS  = 2;
+# Reverse lookups commonly NXDOMAIN — keep them snappy so probe start
+# isn't delayed when there's no PTR record.
+var DNS_REV_TIMEOUT_MS    = 1000;
+var DNS_REV_MAX_ATTEMPTS  = 1;
 var DNS_MAX_MSG       = 512;          # classic non-EDNS DNS message size.
 var DNS_MAX_LABEL     = 63;
+var DNS_MAX_NAME_JUMPS = 16;          # compression-pointer loop guard.
 var DNS_RESOLV_CONF   = "/etc/resolv.conf";
 
 # Byte-by-byte equality. n-byte buffers, no NUL terminator required.
@@ -124,19 +130,61 @@ fn _dns_skip_name(buf, len, off): i64 {
     return DNS_FAIL;
 }
 
-# Parse a DNS response. Returns the first A-record's packed IPv4 on
-# success, DNS_FAIL on any error (truncated buffer, non-zero RCODE, no
-# A record found, ID mismatch). CNAMEs are skipped — most resolvers
-# follow CNAMEs and return the final A record in the same answer
-# section, which is the record we want.
-fn _dns_parse_response(buf, len, expected_qid): i64 {
+# Decode a (possibly-compressed) name into out as a dot-joined NUL-
+# terminated cstr (e.g. "lga25s71-in-f14.1e100.net"). Returns the byte
+# count written (not counting NUL), or DNS_FAIL on truncation, oversize
+# label, out-of-bounds pointer, jump-loop, or out-buf overflow.
+# DNS_MAX_NAME_JUMPS caps pointer chains so a malicious response can't
+# spin forever.
+fn _dns_decode_name(buf, len, off, out, out_cap): i64 {
+    var op = 0;
+    var jumps = 0;
+    var first = 1;
+    while (1) {
+        if (off < 0) { return DNS_FAIL; }
+        if (off >= len) { return DNS_FAIL; }
+        var n = load8(buf + off);
+        if (n == 0) {
+            if (op >= out_cap) { return DNS_FAIL; }
+            store8(out + op, 0);
+            return op;
+        }
+        if ((n & 0xC0) == 0xC0) {
+            if (off + 2 > len) { return DNS_FAIL; }
+            if (jumps >= DNS_MAX_NAME_JUMPS) { return DNS_FAIL; }
+            jumps = jumps + 1;
+            off = ((n & 0x3F) << 8) | load8(buf + off + 1);
+        } else {
+            if (n > 63) { return DNS_FAIL; }
+            if (off + 1 + n > len) { return DNS_FAIL; }
+            if (first == 0) {
+                if (op + 2 > out_cap) { return DNS_FAIL; }
+                store8(out + op, 46);   # '.'
+                op = op + 1;
+            }
+            if (op + n + 1 > out_cap) { return DNS_FAIL; }
+            memcpy(out + op, buf + off + 1, n);
+            op = op + n;
+            first = 0;
+            off = off + 1 + n;
+        }
+    }
+    return DNS_FAIL;
+}
+
+# Validate header + walk the answer section to find the first record
+# matching `rtype`. Returns the offset of that record's RDATA byte
+# (RDLENGTH is at off-2..off-1). DNS_FAIL on any validation failure or
+# no matching record. Shared by _dns_parse_response (A) and
+# _dns_parse_ptr_response (PTR).
+fn _dns_walk_to_type(buf, len, expected_qid, rtype): i64 {
     if (len < DNS_HEADER_LEN) { return DNS_FAIL; }
     var qid = (load8(buf) << 8) | load8(buf + 1);
     if (qid != expected_qid) { return DNS_FAIL; }
     var flags_hi = load8(buf + 2);
     var flags_lo = load8(buf + 3);
-    if ((flags_hi & 0x80) == 0) { return DNS_FAIL; }    # not a response
-    if ((flags_lo & 0x0F) != 0) { return DNS_FAIL; }    # non-zero RCODE
+    if ((flags_hi & 0x80) == 0) { return DNS_FAIL; }
+    if ((flags_lo & 0x0F) != 0) { return DNS_FAIL; }
     var qdcount = (load8(buf + 4) << 8) | load8(buf + 5);
     var ancount = (load8(buf + 6) << 8) | load8(buf + 7);
     if (ancount == 0) { return DNS_FAIL; }
@@ -156,18 +204,36 @@ fn _dns_parse_response(buf, len, expected_qid): i64 {
         off = _dns_skip_name(buf, len, off);
         if (off < 0) { return DNS_FAIL; }
         if (off + 10 > len) { return DNS_FAIL; }
-        var rtype = (load8(buf + off) << 8) | load8(buf + off + 1);
+        var t = (load8(buf + off) << 8) | load8(buf + off + 1);
         var rdlen = (load8(buf + off + 8) << 8) | load8(buf + off + 9);
         off = off + 10;
         if (off + rdlen > len) { return DNS_FAIL; }
-        if (rtype == DNS_TYPE_A) {
-            if (rdlen != 4) { return DNS_FAIL; }
-            return (load8(buf + off) << 24) | (load8(buf + off + 1) << 16) | (load8(buf + off + 2) << 8) | load8(buf + off + 3);
-        }
+        if (t == rtype) { return off; }
         off = off + rdlen;
         a = a + 1;
     }
     return DNS_FAIL;
+}
+
+# Parse a DNS response and return the first A-record's packed IPv4.
+# DNS_FAIL on any error (truncated buffer, non-zero RCODE, no A record
+# found, ID mismatch). CNAMEs are skipped — most resolvers follow them
+# and return the final A record in the same answer section.
+fn _dns_parse_response(buf, len, expected_qid): i64 {
+    var rdata = _dns_walk_to_type(buf, len, expected_qid, DNS_TYPE_A);
+    if (rdata < 0) { return DNS_FAIL; }
+    var rdlen = (load8(buf + rdata - 2) << 8) | load8(buf + rdata - 1);
+    if (rdlen != 4) { return DNS_FAIL; }
+    return (load8(buf + rdata) << 24) | (load8(buf + rdata + 1) << 16) | (load8(buf + rdata + 2) << 8) | load8(buf + rdata + 3);
+}
+
+# Parse a DNS PTR response, decoding the first PTR record's RDATA name
+# into out as a NUL-terminated cstr. Returns name length (no NUL) or
+# DNS_FAIL.
+fn _dns_parse_ptr_response(buf, len, expected_qid, out, out_cap): i64 {
+    var rdata = _dns_walk_to_type(buf, len, expected_qid, DNS_TYPE_PTR);
+    if (rdata < 0) { return DNS_FAIL; }
+    return _dns_decode_name(buf, len, rdata, out, out_cap);
 }
 
 # Parse /etc/resolv.conf-shaped text and return the first IPv4
@@ -241,6 +307,48 @@ fn _dns_choose_nameserver(): i64 {
     return DNS_FALLBACK_NS;
 }
 
+# Build a PTR-query QNAME for the given packed IPv4. For 8.8.8.8 this
+# writes `1 '8' 1 '8' 1 '8' 1 '8' 7 'in-addr' 4 'arpa' 0` (22 bytes).
+# Octets are emitted in REVERSE order per RFC 1035 §3.5 (least-
+# significant first), so 142.250.190.46 becomes 46.190.250.142.in-addr.arpa.
+fn _dns_build_reverse_qname(packed_addr, buf): i64 {
+    var bi = 0;
+    var i = 0;
+    while (i < 4) {
+        var oct = (packed_addr >> (i * 8)) & 0xFF;
+        var lenslot = bi;
+        bi = bi + 1;
+        var n = fmt_int_buf(oct, buf + bi);
+        store8(buf + lenslot, n);
+        bi = bi + n;
+        i = i + 1;
+    }
+    store8(buf + bi, 7);                 bi = bi + 1;
+    memcpy(buf + bi, "in-addr", 7);      bi = bi + 7;
+    store8(buf + bi, 4);                 bi = bi + 1;
+    memcpy(buf + bi, "arpa", 4);         bi = bi + 4;
+    store8(buf + bi, 0);                 bi = bi + 1;
+    return bi;
+}
+
+# Build a full PTR query message for the given packed IPv4. Returns
+# bytes written. Layout matches _dns_build_query except QTYPE = PTR.
+fn _dns_build_ptr_query(buf, qid, packed_addr): i64 {
+    store8(buf,     (qid >> 8) & 0xFF);
+    store8(buf + 1, qid & 0xFF);
+    store8(buf + 2, 0x01);
+    store8(buf + 3, 0x00);
+    store8(buf + 4, 0); store8(buf + 5, 1);
+    store8(buf + 6, 0); store8(buf + 7, 0);
+    store8(buf + 8, 0); store8(buf + 9, 0);
+    store8(buf + 10, 0); store8(buf + 11, 0);
+    var qn = _dns_build_reverse_qname(packed_addr, buf + DNS_HEADER_LEN);
+    var off = DNS_HEADER_LEN + qn;
+    store8(buf + off,     0); store8(buf + off + 1, DNS_TYPE_PTR);
+    store8(buf + off + 2, 0); store8(buf + off + 3, DNS_CLASS_IN);
+    return off + 4;
+}
+
 # Resolve a hostname to a packed IPv4 via DNS. Returns DNS_FAIL on
 # failure (timeout × DNS_MAX_ATTEMPTS, malformed response, NXDOMAIN,
 # no A record). The QID is derived from CLOCK_MONOTONIC microseconds
@@ -265,6 +373,38 @@ fn dns_resolve(host): i64 {
             if (n > 0) {
                 var addr = _dns_parse_response(resp, n, qid);
                 if (addr >= 0) { platform_close(fd); return addr; }
+            }
+        }
+        attempt = attempt + 1;
+    }
+    platform_close(fd);
+    return DNS_FAIL;
+}
+
+# Reverse-resolve a packed IPv4 to a hostname via PTR query. Writes the
+# NUL-terminated name into out and returns its length (no NUL), or
+# DNS_FAIL on any failure. Uses a shorter timeout / fewer attempts than
+# forward DNS because most IPs have no PTR record and we don't want
+# probe start to drag.
+fn dns_reverse_resolve(packed_addr, out, out_cap): i64 {
+    var ns = _dns_choose_nameserver();
+    var fd = platform_udp_open();
+    if (fd < 0) { return DNS_FAIL; }
+    platform_set_recv_timeout_ms(fd, DNS_REV_TIMEOUT_MS);
+
+    var query = alloc(DNS_MAX_MSG);
+    var qid = platform_now_us() & 0xFFFF;
+    var qlen = _dns_build_ptr_query(query, qid, packed_addr);
+
+    var resp = alloc(DNS_MAX_MSG);
+    var attempt = 0;
+    while (attempt < DNS_REV_MAX_ATTEMPTS) {
+        var sent = platform_udp_send_to(fd, ns, DNS_PORT, query, qlen);
+        if (sent > 0) {
+            var n = platform_udp_recv(fd, resp, DNS_MAX_MSG);
+            if (n > 0) {
+                var nm = _dns_parse_ptr_response(resp, n, qid, out, out_cap);
+                if (nm > 0) { platform_close(fd); return nm; }
             }
         }
         attempt = attempt + 1;

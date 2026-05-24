@@ -38,29 +38,32 @@ fn _output_print_us_as_ms(us): i64 {
 
 fn _output_puts(s): i64 { syscall(1, 1, s, strlen(s)); return 0; }
 
-# Print a packed IPv4 (high byte = first octet, matches ipv4_parse).
-fn _output_print_ipv4(packed): i64 {
-    fmt_int((packed >> 24) & 0xFF);
-    syscall(1, 1, ".", 1);
-    fmt_int((packed >> 16) & 0xFF);
-    syscall(1, 1, ".", 1);
-    fmt_int((packed >> 8) & 0xFF);
-    syscall(1, 1, ".", 1);
-    fmt_int(packed & 0xFF);
-    return 0;
+# Write a packed IPv4 (high byte = first octet, matches ipv4_parse)
+# into buf as a NUL-terminated cstr like "255.255.255.255". Returns
+# bytes written, not counting NUL. Buf must hold at least 16 bytes.
+fn output_ipv4_to_buf(packed, buf): i64 {
+    var p = fmt_int_buf((packed >> 24) & 0xFF, buf);
+    store8(buf + p, 46); p = p + 1;
+    p = p + fmt_int_buf((packed >> 16) & 0xFF, buf + p);
+    store8(buf + p, 46); p = p + 1;
+    p = p + fmt_int_buf((packed >> 8) & 0xFF, buf + p);
+    store8(buf + p, 46); p = p + 1;
+    p = p + fmt_int_buf(packed & 0xFF, buf + p);
+    store8(buf + p, 0);
+    return p;
 }
 
-# Print the run-time banner. When show_resolved is 1, a parenthetical
-# `(a.b.c.d)` follows the target — used when the target was a hostname
-# that DNS resolved. Shape:
-#   yo 8.8.8.8 — 56 bytes               (literal IP)
-#   yo google.com (142.250.x.x) — 56 bytes   (DNS-resolved)
-fn output_banner(target, packed_addr, show_resolved, size): i64 {
+# Print the run-time banner. `parens` is a cstr to display in
+# parentheses after the target, or 0 to suppress. Shape:
+#   yo 8.8.8.8 — 56 bytes                     (literal IP, no PTR / numeric)
+#   yo 8.8.8.8 (dns.google) — 56 bytes        (literal IP, PTR found)
+#   yo google.com (142.250.x.x) — 56 bytes    (DNS-resolved hostname)
+fn output_banner(target, parens, size): i64 {
     _output_puts("yo ");
     _output_puts(target);
-    if (show_resolved == 1) {
+    if (parens != 0) {
         _output_puts(" (");
-        _output_print_ipv4(packed_addr);
+        _output_puts(parens);
         _output_puts(")");
     }
     _output_puts(" — ");

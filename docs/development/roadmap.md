@@ -1,6 +1,6 @@
 # yo — Roadmap
 
-> **Status**: Active | **Last Updated**: 2026-05-23 (post 0.4.0 DNS)
+> **Status**: Active | **Last Updated**: 2026-05-23 (post 0.4.1 reverse DNS)
 >
 > Milestone path from scaffold through v1.0 (POSIX-ping feature parity, multi-backend). Per first-party-documentation roadmap shape: **Completed** / **Backlog** / **Future** / **v1.0 criteria**.
 >
@@ -17,6 +17,7 @@
 | **0.1.0** | 2026-05-23 | Initial `cyrius init` scaffold. README + CLAUDE.md + LICENSE + CHANGELOG + cyrius.cyml + tests/yo.{tcyr,bcyr,fcyr} + `.github/workflows/{ci,release}.yml`. Stub `main.cyr` prints `hello from yo`. Stdlib vendored in `lib/`. |
 | **0.3.0** | 2026-05-23 | **Linux MVP.** Full CLI (`-c -W -i -s -q -v -h` + long forms) via `lib/flags.cyr`. Strict IPv4 dotted-quad parser. RFC 792 ICMP framing + RFC 1071 checksum. RTT accumulator + README-shaped per-packet/summary output. Linux backend via `src/platform_linux.cyr` (unprivileged SOCK_DGRAM ICMP, falls back to SOCK_RAW). Probe loop with SO_RCVTIMEO. Ctrl-C handling via signalfd. POSIX exit codes (0 / 1 / 2). 87 unit assertions. `workflow_call:` enabled in `ci.yml` so `release.yml` can gate on it. |
 | **0.4.0** | 2026-05-23 | **DNS resolution.** `yo <hostname>` works end-to-end. `src/dns.cyr` — RFC 1035 A-record resolver: QNAME encoder, query builder, response parser (compressed-pointer NAMEs, skips CNAMEs to first A record), `/etc/resolv.conf` line parser, fallback to `1.1.1.1`. UDP primitives + `platform_read_file` added to `platform_linux.cyr`. Banner shows `yo google.com (142.x.y.z)` when DNS was used. NXDOMAIN exits 2 with `yo: cannot resolve host: <name>`. 133 unit assertions (+46). |
+| **0.4.1** | 2026-05-23 | **Reverse DNS.** `yo 8.8.8.8` now banners as `yo 8.8.8.8 (dns.google) — 56 bytes`. `dns_reverse_resolve` issues a PTR query against `D.C.B.A.in-addr.arpa.` with 1 s timeout / 1 attempt. New helpers: `_dns_build_reverse_qname`, `_dns_build_ptr_query`, `_dns_decode_name` (compressed-pointer-aware with 16-jump loop guard), `_dns_parse_ptr_response`. Factored `_dns_walk_to_type` shared by forward+reverse parsers. `-n` / `--numeric` CLI flag suppresses the lookup. 169 unit assertions (+36). |
 
 ---
 
@@ -30,7 +31,7 @@ Everything in this band is achievable on the Linux backend alone — no new plat
 
 - [x] **DNS resolution** (`yo google.com`) — landed in 0.4.0. `src/dns.cyr`: `/etc/resolv.conf` parser, UDP query, RFC 1035 response parse with compressed-pointer + CNAME-skip support. Did NOT trigger `taar` extraction per [[feedback-yo-extract-after-second-consumer]] — still waiting on `dig`.
 - [x] **Stable banner on hostname target** — landed in 0.4.0. `yo google.com` now produces `yo google.com (142.x.y.z) — 56 bytes` and probes normally; NXDOMAIN exits 2 with `yo: cannot resolve host: <name>`.
-- [ ] **Reverse DNS lookup**. Banner shows `yo 142.250.x.x (lga25s71-in-f14.1e100.net)` when target was an IP. Forward-DNS direction already done in 0.4.0. Implementation: PTR query against `D.C.B.A.in-addr.arpa.`, reuse `_dns_build_query`/`_dns_parse_response` core with a tiny extra path for parsing a name out of an answer's RDATA (currently we only parse A-record RDATA).
+- [x] **Reverse DNS lookup** — landed in 0.4.1. PTR query against `D.C.B.A.in-addr.arpa.` with compressed-name decoder; banner shows `yo 8.8.8.8 (dns.google) — 56 bytes` when a PTR exists. `-n` / `--numeric` flag suppresses the lookup.
 - [ ] **Multiple targets** (`yo router 8.8.8.8`). Sequential probe runs with per-target summary, then a combined exit code.
 - [ ] **TTL / hop-limit display** in per-packet output (read from response IP header on SOCK_RAW; from cmsg on SOCK_DGRAM via `IP_RECVTTL`).
 

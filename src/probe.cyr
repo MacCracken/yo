@@ -19,9 +19,10 @@ fn _probe_fill_payload(buf, n): i64 {
 }
 
 # Run the full probe sequence. Returns the process exit code.
-# show_resolved = 1 when target_cstr was a hostname (DNS-resolved) so
-# the banner appends `(a.b.c.d)`; 0 for literal-IP targets.
-fn probe_run(target_cstr, packed_addr, show_resolved, count, timeout_ms, interval_ms, size, quiet): i64 {
+# `banner_parens` is a cstr displayed in parentheses on the banner (the
+# resolved IP for hostname targets, or the reverse-DNS name for literal
+# IPs), or 0 to suppress.
+fn probe_run(target_cstr, packed_addr, banner_parens, count, timeout_ms, interval_ms, size, quiet): i64 {
     var fd = platform_icmp_open();
     if (fd < 0) {
         var msg = "yo: cannot open ICMP socket — try adjusting /proc/sys/net/ipv4/ping_group_range or run with CAP_NET_RAW\n";
@@ -45,7 +46,7 @@ fn probe_run(target_cstr, packed_addr, show_resolved, count, timeout_ms, interva
     var ident = 0x1234;
 
     var s = stats_new();
-    if (quiet == 0) { output_banner(target_cstr, packed_addr, show_resolved, size); }
+    if (quiet == 0) { output_banner(target_cstr, banner_parens, size); }
 
     var sigfd = platform_install_interrupt_watch();
 

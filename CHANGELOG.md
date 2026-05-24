@@ -4,6 +4,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-05-23
+
+Reverse DNS. `yo 8.8.8.8` now banners as `yo 8.8.8.8 (dns.google) — 56 bytes` — the symmetric completion of the 0.4.0 forward-DNS work. Second item in the 0.4.x band.
+
+### Added
+- `src/dns.cyr` — `dns_reverse_resolve(packed, out, cap)` issues a PTR query against the `D.C.B.A.in-addr.arpa.` name and decodes the answer's RDATA into the caller's buffer. New helpers: `_dns_build_reverse_qname` (octets emitted least-significant-first per RFC 1035 §3.5), `_dns_build_ptr_query`, `_dns_decode_name` (compressed-pointer-aware with a 16-jump loop guard), `_dns_parse_ptr_response`. Shared `_dns_walk_to_type` factored out so forward (A) and reverse (PTR) parsing share header validation + answer walking. Shorter timeout (1 s) and 1 attempt so probe start isn't delayed when no PTR record exists.
+- `src/cli.cyr` — `-n` / `--numeric` flag (POSIX-ping shape) to skip reverse lookup. Registry grew from 64 B to 72 B (8 slots).
+- `src/output.cyr` — `output_ipv4_to_buf(packed, buf)` formats a packed IPv4 as a NUL-terminated cstr. `output_banner` now takes a `parens` cstr (or 0) instead of `(packed_addr, show_resolved)` — main.cyr fills the parens with the resolved IP for hostname targets or the reverse-DNS name for literal IPs.
+- `src/main.cyr` — chooses the banner parens: forward path formats the resolved IPv4, reverse path calls `dns_reverse_resolve` unless `-n` was given. Reverse-lookup failure silently leaves parens empty.
+- `tests/yo.tcyr` — 36 new assertions (169 total) covering reverse-QNAME bytes for single- and triple-digit octets, name decoder (uncompressed, single pointer, label-then-pointer, self-loop guard, out-of-bounds pointer, out-buf overflow), PTR response extraction, `output_ipv4_to_buf` shape, and `-n` / `--numeric` parse.
+
 ## [0.4.0] — 2026-05-23
 
 DNS resolution. `yo <hostname>` now works — first item in the 0.4.x DNS + UX-polish band per [roadmap.md](docs/development/roadmap.md).

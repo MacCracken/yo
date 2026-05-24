@@ -431,6 +431,138 @@ fn main() {
     var rc8 = "nameserver 5.6.7.8";
     assert_eq(_dns_resolv_conf_nameserver(rc8, strlen(rc8)), 0x05060708, "no trailing newline ok");
 
+    # ----- dns: reverse qname builder -----
+    test_group("dns _build_reverse_qname");
+
+    # 8.8.8.8 → 8.8.8.8.in-addr.arpa (22 bytes)
+    var rq1[32];
+    var rq1len = _dns_build_reverse_qname(0x08080808, &rq1);
+    assert_eq(rq1len, 22, "8.8.8.8 → 22 bytes");
+    assert_eq(load8(&rq1 + 0),  1,   "label0 len");
+    assert_eq(load8(&rq1 + 1),  56,  "'8' = 0x38");
+    assert_eq(load8(&rq1 + 8),  7,   "in-addr label len = 7");
+    assert_eq(load8(&rq1 + 16), 4,   "arpa label len = 4");
+    assert_eq(load8(&rq1 + 21), 0,   "terminator at off 21");
+
+    # 142.250.190.46 → 46.190.250.142.in-addr.arpa (3-digit octets, 29 bytes)
+    var rq2[40];
+    var rq2len = _dns_build_reverse_qname(0x8EFABE2E, &rq2);
+    assert_eq(rq2len, 29, "142.250.190.46 → 29 bytes (3-digit octets)");
+    assert_eq(load8(&rq2 + 0), 2, "first octet label = len 2 ('46')");
+    assert_eq(load8(&rq2 + 1), 52, "'4' = 0x34");
+    assert_eq(load8(&rq2 + 2), 54, "'6' = 0x36");
+    assert_eq(load8(&rq2 + 3), 3, "second octet label = len 3 ('190')");
+    assert_eq(load8(&rq2 + 28), 0, "terminator at off 28");
+
+    # 1.1.1.1 → labels all single-digit → 8 + 8 + 5 + 1 = 22 bytes
+    var rq3[32];
+    var rq3len = _dns_build_reverse_qname(0x01010101, &rq3);
+    assert_eq(rq3len, 22, "1.1.1.1 → 22 bytes");
+
+    # ----- dns: decode_name -----
+    test_group("dns _decode_name");
+
+    # Uncompressed "foo.bar" at off 0
+    var dn1[16];
+    store8(&dn1 + 0, 3); store8(&dn1 + 1, 102); store8(&dn1 + 2, 111); store8(&dn1 + 3, 111);
+    store8(&dn1 + 4, 3); store8(&dn1 + 5, 98);  store8(&dn1 + 6, 97);  store8(&dn1 + 7, 114);
+    store8(&dn1 + 8, 0);
+    var out1[16];
+    assert_eq(_dns_decode_name(&dn1, 16, 0, &out1, 16), 7, "decode foo.bar → 7 bytes");
+    assert_eq(streq(&out1, "foo.bar"), 1, "decoded cstr matches");
+
+    # Single pointer: "foo.bar" at off 0, pointer at off 9 jumps to 0
+    var dn2[16];
+    store8(&dn2 + 0, 3); store8(&dn2 + 1, 102); store8(&dn2 + 2, 111); store8(&dn2 + 3, 111);
+    store8(&dn2 + 4, 3); store8(&dn2 + 5, 98);  store8(&dn2 + 6, 97);  store8(&dn2 + 7, 114);
+    store8(&dn2 + 8, 0);
+    store8(&dn2 + 9, 0xC0); store8(&dn2 + 10, 0x00);
+    var out2[16];
+    assert_eq(_dns_decode_name(&dn2, 16, 9, &out2, 16), 7, "decode via pointer → 7 bytes");
+    assert_eq(streq(&out2, "foo.bar"), 1, "pointer decode same as direct");
+
+    # Label + pointer: 1 'a' + ptr-to-foo.bar → "a.foo.bar"
+    var dn3[24];
+    store8(&dn3 + 0, 3); store8(&dn3 + 1, 102); store8(&dn3 + 2, 111); store8(&dn3 + 3, 111);
+    store8(&dn3 + 4, 3); store8(&dn3 + 5, 98);  store8(&dn3 + 6, 97);  store8(&dn3 + 7, 114);
+    store8(&dn3 + 8, 0);
+    store8(&dn3 + 9, 1); store8(&dn3 + 10, 97);     # 'a'
+    store8(&dn3 + 11, 0xC0); store8(&dn3 + 12, 0x00);
+    var out3[16];
+    assert_eq(_dns_decode_name(&dn3, 24, 9, &out3, 16), 9, "a + ptr-to-foo.bar → 9 bytes");
+    assert_eq(streq(&out3, "a.foo.bar"), 1, "label-then-pointer decode");
+
+    # Pointer-loop guard: pointer points to itself → FAIL after 16 jumps
+    var dn4[8];
+    store8(&dn4 + 0, 0xC0); store8(&dn4 + 1, 0x00);
+    var out4[16];
+    assert(_dns_decode_name(&dn4, 8, 0, &out4, 16) < 0, "self-loop pointer rejected");
+
+    # Out-buf overflow: 5-byte cap, decoding "foo.bar" (needs 8 incl NUL) → FAIL
+    var out5[5];
+    assert(_dns_decode_name(&dn1, 16, 0, &out5, 5) < 0, "out-buf too small rejected");
+
+    # Out-of-bounds pointer
+    var dn6[4];
+    store8(&dn6 + 0, 0xC0); store8(&dn6 + 1, 99);   # off 99 is way past len=4
+    var out6[16];
+    assert(_dns_decode_name(&dn6, 4, 0, &out6, 16) < 0, "pointer out of range rejected");
+
+    # ----- dns: parse_ptr_response -----
+    test_group("dns _parse_ptr_response");
+
+    # Build a response: header + PTR question for 1.1.1.1 + answer with name "x.y"
+    var pr[80];
+    var pr_len = _dns_build_ptr_query(&pr, 0x1234, 0x01010101);   # 38 bytes (12 hdr + 22 qname + 4)
+    # Flip to response: QR=1, RCODE=0, AN=1
+    store8(&pr + 2, 0x81);
+    store8(&pr + 3, 0x80);
+    store8(&pr + 7, 1);
+    # Answer at off 38: ptr(2) + type PTR(2) + class IN(2) + TTL(4) + rdlen(2) + rdata
+    store8(&pr + 38, 0xC0); store8(&pr + 39, 0x0C);
+    store8(&pr + 40, 0);    store8(&pr + 41, 12);   # TYPE PTR
+    store8(&pr + 42, 0);    store8(&pr + 43, 1);    # CLASS IN
+    store8(&pr + 44, 0); store8(&pr + 45, 0); store8(&pr + 46, 0); store8(&pr + 47, 120);
+    store8(&pr + 48, 0);    store8(&pr + 49, 5);    # RDLEN 5
+    store8(&pr + 50, 1);    store8(&pr + 51, 120);  # 'x'
+    store8(&pr + 52, 1);    store8(&pr + 53, 121);  # 'y'
+    store8(&pr + 54, 0);
+    var pr_out[32];
+    assert_eq(_dns_parse_ptr_response(&pr, 55, 0x1234, &pr_out, 32), 3, "PTR rdata decoded → 3 bytes");
+    assert_eq(streq(&pr_out, "x.y"), 1, "PTR cstr matches");
+
+    # ID mismatch
+    assert(_dns_parse_ptr_response(&pr, 55, 0x9999, &pr_out, 32) < 0, "wrong qid rejected");
+
+    # ----- output: ipv4_to_buf -----
+    test_group("output ipv4_to_buf");
+
+    var ib[20];
+    assert_eq(output_ipv4_to_buf(0x7F000001, &ib), 9,  "127.0.0.1 → 9 bytes");
+    assert_eq(streq(&ib, "127.0.0.1"), 1, "127.0.0.1 string");
+    assert_eq(output_ipv4_to_buf(0xFFFFFFFF, &ib), 15, "255.255.255.255 → 15 bytes");
+    assert_eq(streq(&ib, "255.255.255.255"), 1, "255.255.255.255 string");
+    assert_eq(output_ipv4_to_buf(0x00000000, &ib), 7,  "0.0.0.0 → 7 bytes");
+    assert_eq(streq(&ib, "0.0.0.0"), 1, "0.0.0.0 string");
+
+    # ----- CLI: -n / --numeric -----
+    test_group("cli numeric flag");
+
+    var reg_nf = cli_new();
+    var av_nf = _mk_argv("yo", "-n", "host", 0, 0, 0, 0, 0);
+    assert_eq(cli_parse_argv(reg_nf, 3, av_nf), CLI_OK, "-n parses");
+    assert_eq(cli_numeric(reg_nf), 1, "-n sets numeric");
+
+    var reg_nl = cli_new();
+    var av_nl = _mk_argv("yo", "--numeric", "host", 0, 0, 0, 0, 0);
+    assert_eq(cli_parse_argv(reg_nl, 3, av_nl), CLI_OK, "--numeric parses");
+    assert_eq(cli_numeric(reg_nl), 1, "--numeric sets numeric");
+
+    var reg_nd = cli_new();
+    var av_nd = _mk_argv("yo", "host", 0, 0, 0, 0, 0, 0);
+    cli_parse_argv(reg_nd, 2, av_nd);
+    assert_eq(cli_numeric(reg_nd), 0, "numeric off by default");
+
     return assert_summary();
 }
 
