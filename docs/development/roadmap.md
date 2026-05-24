@@ -1,6 +1,6 @@
 # yo — Roadmap
 
-> **Status**: Active | **Last Updated**: 2026-05-23 (post 0.4.3 TTL — closes 0.4.x band)
+> **Status**: Active | **Last Updated**: 2026-05-23 (post 0.5.0 IPv6 literal probe)
 >
 > Milestone path from scaffold through v1.0 (POSIX-ping feature parity, multi-backend). Per first-party-documentation roadmap shape: **Completed** / **Backlog** / **Future** / **v1.0 criteria**.
 >
@@ -20,6 +20,7 @@
 | **0.4.1** | 2026-05-23 | **Reverse DNS.** `yo 8.8.8.8` now banners as `yo 8.8.8.8 (dns.google) — 56 bytes`. `dns_reverse_resolve` issues a PTR query against `D.C.B.A.in-addr.arpa.` with 1 s timeout / 1 attempt. New helpers: `_dns_build_reverse_qname`, `_dns_build_ptr_query`, `_dns_decode_name` (compressed-pointer-aware with 16-jump loop guard), `_dns_parse_ptr_response`. Factored `_dns_walk_to_type` shared by forward+reverse parsers. `-n` / `--numeric` CLI flag suppresses the lookup. 169 unit assertions (+36). |
 | **0.4.2** | 2026-05-23 | **Multiple targets.** `yo router 8.8.8.8 1.1.1.1` runs each target sequentially with its own banner + summary block; non-quiet mode separates them with a blank line. Unresolvable hosts no longer abort — error to stderr, continue to next target. Aggregate exit: `0` if any target had any reply, `2` on resolve/socket error with no replies, `1` otherwise. New accessors: `cli_target_count`, `cli_target_at`. 181 unit assertions (+12). |
 | **0.4.3** | 2026-05-23 | **TTL display.** Per-packet output now shows the response TTL: `seq=0  ttl=57  rtt=5.83 ms`. `IP_RECVTTL` socket option enabled in `platform_icmp_open`; new `platform_icmp_recv_ext(fd, buf, maxlen, ttl_out)` switches to `recvmsg` (syscall 47) and walks the ancillary cmsg chain via the pure helper `_lx_cmsg_find_ttl`. `output_reply` gains a `ttl` parameter — chunk omitted gracefully when 0. Closes the 0.4.x band; next milestone is 0.5.x IPv6. 187 unit assertions (+6). |
+| **0.5.0** | 2026-05-23 | **IPv6 literal probe.** `yo ::1`, `yo 2001:db8::1`, full eight-group form, ULA/loopback all work end-to-end against the Linux AF_INET6 SOCK_DGRAM ICMPv6 path. New `src/ipv6.cyr` parser (RFC 4291, single `::`, case-insensitive, 16 packed bytes network-order). `src/icmp.cyr` adds ICMPV6_ECHO_REQUEST/REPLY + `icmp6_build_echo_request` (kernel fills checksum via `IPV6_CHECKSUM` offset=2). `src/platform_linux.cyr` adds `_lx_sockaddr_in6`, `platform_icmp6_open/_send_to/_recv_ext`, `_lx_cmsg_find_hoplimit`. `probe_run(target, af, addr_arg, ...)` dispatches v4 vs v6 per-target; multi-target invocations can mix families. Deferred to 0.5.1: AAAA lookup, `ip6.arpa` PTR, `-4`/`-6` flags, scope IDs, IPv4-embedded textual form. 252 unit assertions (+65). |
 
 ---
 
@@ -39,10 +40,11 @@ Everything in this band is achievable on the Linux backend alone — no new plat
 
 ### 0.5.x — IPv6
 
-- [ ] IPv6 dotted-colon parser (`::1`, `fe80::...`). Inline in `src/ipv6.cyr` mirroring `ipv4.cyr` shape.
-- [ ] ICMPv6 framing in `src/icmp.cyr` (or `src/icmp6.cyr` if it grows large). Echo Request = type 128, Echo Reply = type 129; checksum includes IPv6 pseudo-header.
-- [ ] `platform_linux.cyr` adds `AF_INET6` socket open, `sockaddr_in6` (28 bytes) builder, IPPROTO_ICMPV6 = 58.
-- [ ] CLI gains `-4` / `-6` to force address family when the target is a hostname.
+- [x] **IPv6 colon-hex parser** (`::1`, `2001:db8::1`, full 8-group) — landed in 0.5.0. `src/ipv6.cyr`, 16 packed bytes network-order, single `::` per RFC 4291, case-insensitive. Scope IDs and IPv4-embedded textual form deferred.
+- [x] **ICMPv6 framing** — landed in 0.5.0. Echo Request = type 128, Reply = 129. Kernel fills the checksum on AF_INET6 SOCK_DGRAM when `IPV6_CHECKSUM` is enabled with offset=2 (no pseudo-header math needed in yo).
+- [x] **Platform IPv6 surface** — landed in 0.5.0. `_lx_sockaddr_in6` (28 B), `platform_icmp6_open/_send_to/_recv_ext`, hop-limit cmsg walker. AF_INET6=10, IPPROTO_ICMPV6=58, IPPROTO_IPV6=41.
+- [ ] **AAAA DNS lookup + `-4` / `-6` flags** (0.5.1). Hostname targets currently resolve A only; `-4` / `-6` only matters once AAAA is on the table. Also includes `ip6.arpa` PTR reverse-DNS so `yo 2001:4860:4860::8888` banners `(dns.google)`.
+- [ ] **Scope IDs + IPv4-embedded form** (0.5.1 or later). `fe80::1%eth0` (zone-index lookup) and `::ffff:1.2.3.4` (dotted-quad embedded in v6).
 
 ### 0.6.x — AGNOS backend
 

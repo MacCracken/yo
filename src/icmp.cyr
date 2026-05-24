@@ -72,3 +72,35 @@ fn icmp_verify(buf, len): i64 {
     if (icmp_checksum(buf, len) == 0) { return 1; }
     return 0;
 }
+
+# ----- ICMPv6 (RFC 4443) -----
+#
+# Wire shape is identical to ICMPv4 — type/code/cksum/ident/seq/payload
+# — only the type numbers differ and the checksum spans the IPv6
+# pseudo-header (RFC 8200 §8.1: src + dst + length + next-header=58).
+# Under Linux AF_INET6 SOCK_DGRAM IPPROTO_ICMPV6, the kernel computes
+# and fills the checksum for us when IPV6_CHECKSUM is enabled with the
+# offset of the cksum field (=2). On send we leave bytes 2-3 at zero;
+# on receive the kernel has already validated the checksum, so we only
+# need to verify type == ICMPV6_ECHO_REPLY.
+
+var ICMPV6_ECHO_REQUEST = 128;
+var ICMPV6_ECHO_REPLY   = 129;
+
+# Build an ICMPv6 echo-request packet. Same byte layout as v4 but
+# type=128 and checksum is left zero — the AF_INET6 SOCK_DGRAM ICMPv6
+# kernel path fills it in on send (see _lx_enable_ipv6_checksum).
+fn icmp6_build_echo_request(buf, ident, seq, payload, payload_len): i64 {
+    store8(buf,     ICMPV6_ECHO_REQUEST);
+    store8(buf + 1, 0);
+    store8(buf + 2, 0);                         # checksum filled by kernel
+    store8(buf + 3, 0);
+    store8(buf + 4, (ident >> 8) & 0xFF);
+    store8(buf + 5, ident & 0xFF);
+    store8(buf + 6, (seq >> 8) & 0xFF);
+    store8(buf + 7, seq & 0xFF);
+    if (payload_len > 0) {
+        memcpy(buf + ICMP_HEADER_LEN, payload, payload_len);
+    }
+    return ICMP_HEADER_LEN + payload_len;
+}

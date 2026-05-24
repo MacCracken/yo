@@ -4,6 +4,7 @@
 include "src/icmp.cyr"
 include "src/cli.cyr"
 include "src/ipv4.cyr"
+include "src/ipv6.cyr"
 include "src/stats.cyr"
 include "src/output.cyr"
 include "src/platform.cyr"
@@ -90,6 +91,29 @@ fn main() {
 
     # Too-short buffer → reject without reading past end.
     assert_eq(icmp_verify(&pkt, 4), 0, "len<8 rejected");
+
+    # ----- ICMPv6 build_echo_request -----
+    test_group("icmp6_build_echo_request");
+
+    var pkt6[64];
+    var n6 = icmp6_build_echo_request(&pkt6, 0xCAFE, 7, &payload, 5);
+    assert_eq(n6, 13, "v6 header(8) + payload(5) = 13 bytes");
+    assert_eq(load8(&pkt6 + 0), 128,   "v6 type = ECHO_REQUEST (128)");
+    assert_eq(load8(&pkt6 + 1), 0,     "v6 code = 0");
+    assert_eq(load8(&pkt6 + 2), 0,     "v6 checksum hi = 0 (kernel fills)");
+    assert_eq(load8(&pkt6 + 3), 0,     "v6 checksum lo = 0 (kernel fills)");
+    assert_eq(load8(&pkt6 + 4), 0xCA,  "v6 ident high byte");
+    assert_eq(load8(&pkt6 + 5), 0xFE,  "v6 ident low byte");
+    assert_eq(load8(&pkt6 + 6), 0,     "v6 seq high byte");
+    assert_eq(load8(&pkt6 + 7), 7,     "v6 seq low byte");
+    assert_eq(load8(&pkt6 + 8), 0x68,  "v6 payload byte 0 = 'h'");
+    assert_eq(load8(&pkt6 + 12), 0x6F, "v6 payload byte 4 = 'o'");
+
+    # Header-only echo-request also valid
+    var hdronly6[16];
+    var nh6 = icmp6_build_echo_request(&hdronly6, 1, 1, &payload, 0);
+    assert_eq(nh6, 8, "v6 header-only = 8 bytes");
+    assert_eq(load8(&hdronly6 + 0), 128, "v6 header-only type = 128");
 
     # ----- CLI parse: defaults -----
     test_group("cli defaults");
@@ -589,6 +613,87 @@ fn main() {
     var av_m3 = _mk_argv("yo", "only.host", 0, 0, 0, 0, 0, 0);
     cli_parse_argv(reg_m3, 2, av_m3);
     assert_eq(cli_target_count(reg_m3), 1, "single target → count=1");
+
+    # ----- ipv6_parse: happy paths -----
+    test_group("ipv6_parse valid");
+
+    var v6[16];
+
+    # ::1 → 15 zero bytes then 0x01
+    assert_eq(ipv6_parse("::1", &v6), 0, "::1 parses");
+    var sum_zeros = 0; var k = 0;
+    while (k < 15) { sum_zeros = sum_zeros + load8(&v6 + k); k = k + 1; }
+    assert_eq(sum_zeros, 0, "::1 first 15 bytes are zero");
+    assert_eq(load8(&v6 + 15), 1, "::1 last byte = 0x01");
+
+    # :: → all zeros
+    assert_eq(ipv6_parse("::", &v6), 0, ":: parses");
+    var sum_all = 0; var k2 = 0;
+    while (k2 < 16) { sum_all = sum_all + load8(&v6 + k2); k2 = k2 + 1; }
+    assert_eq(sum_all, 0, ":: → 16 zero bytes");
+
+    # 1:: → first byte 0x00, second 0x01, rest zero
+    assert_eq(ipv6_parse("1::", &v6), 0, "1:: parses");
+    assert_eq(load8(&v6 + 0), 0, "1:: byte 0 = 0x00");
+    assert_eq(load8(&v6 + 1), 1, "1:: byte 1 = 0x01");
+    assert_eq(load8(&v6 + 2), 0, "1:: byte 2 = 0x00");
+    assert_eq(load8(&v6 + 15), 0, "1:: byte 15 = 0x00");
+
+    # 2001:db8::1 → 20 01 0d b8 00..00 00 01
+    assert_eq(ipv6_parse("2001:db8::1", &v6), 0, "2001:db8::1 parses");
+    assert_eq(load8(&v6 + 0),  0x20, "byte 0 = 0x20");
+    assert_eq(load8(&v6 + 1),  0x01, "byte 1 = 0x01");
+    assert_eq(load8(&v6 + 2),  0x0D, "byte 2 = 0x0d");
+    assert_eq(load8(&v6 + 3),  0xB8, "byte 3 = 0xb8");
+    assert_eq(load8(&v6 + 4),  0x00, "byte 4 = 0x00");
+    assert_eq(load8(&v6 + 14), 0x00, "byte 14 = 0x00");
+    assert_eq(load8(&v6 + 15), 0x01, "byte 15 = 0x01");
+
+    # Uppercase + mixed case
+    assert_eq(ipv6_parse("2001:DB8::1", &v6), 0, "uppercase parses");
+    assert_eq(load8(&v6 + 3), 0xB8, "uppercase byte 3 = 0xb8");
+    assert_eq(ipv6_parse("2001:Db8::1", &v6), 0, "mixed case parses");
+    assert_eq(load8(&v6 + 3), 0xB8, "mixed case byte 3 = 0xb8");
+
+    # Full eight-group form (no zero compression)
+    assert_eq(ipv6_parse("0001:0002:0003:0004:0005:0006:0007:0008", &v6), 0, "full 8-group");
+    assert_eq(load8(&v6 + 0),  0x00, "g0 hi");
+    assert_eq(load8(&v6 + 1),  0x01, "g0 lo");
+    assert_eq(load8(&v6 + 14), 0x00, "g7 hi");
+    assert_eq(load8(&v6 + 15), 0x08, "g7 lo");
+
+    # Trailing "::" → trailing zero groups
+    assert_eq(ipv6_parse("1:2:3::", &v6), 0, "1:2:3:: parses");
+    assert_eq(load8(&v6 + 0), 0x00, "g0 hi");
+    assert_eq(load8(&v6 + 1), 0x01, "g0 lo");
+    assert_eq(load8(&v6 + 4), 0x00, "g2 hi");
+    assert_eq(load8(&v6 + 5), 0x03, "g2 lo");
+    assert_eq(load8(&v6 + 6),  0, "g3 zero");
+    assert_eq(load8(&v6 + 15), 0, "tail zero");
+
+    # Google DNS IPv6 — 2001:4860:4860::8888
+    assert_eq(ipv6_parse("2001:4860:4860::8888", &v6), 0, "google v6 parses");
+    assert_eq(load8(&v6 + 0),  0x20, "byte 0");
+    assert_eq(load8(&v6 + 4),  0x48, "byte 4");
+    assert_eq(load8(&v6 + 14), 0x88, "byte 14");
+    assert_eq(load8(&v6 + 15), 0x88, "byte 15");
+
+    # ----- ipv6_parse: rejects -----
+    test_group("ipv6_parse invalid");
+
+    assert(ipv6_parse("",                       &v6) < 0, "empty rejected");
+    assert(ipv6_parse(":",                      &v6) < 0, "single colon rejected");
+    assert(ipv6_parse(":1",                     &v6) < 0, "leading single colon rejected");
+    assert(ipv6_parse("1:",                     &v6) < 0, "trailing single colon rejected");
+    assert(ipv6_parse("1::2::3",                &v6) < 0, "double :: rejected");
+    assert(ipv6_parse("12345::",                &v6) < 0, "5-digit group rejected");
+    assert(ipv6_parse("1:2:3:4:5:6:7",          &v6) < 0, "7 groups w/o :: rejected");
+    assert(ipv6_parse("1:2:3:4:5:6:7:8:9",      &v6) < 0, "9 groups rejected");
+    assert(ipv6_parse("1:2:3:4:5:6:7:8::",      &v6) < 0, ":: with full 8 groups rejected (gap < 1)");
+    assert(ipv6_parse("g::1",                   &v6) < 0, "non-hex digit rejected");
+    assert(ipv6_parse("fe80::1%eth0",           &v6) < 0, "scope-id rejected (0.5.0 scope)");
+    assert(ipv6_parse("::ffff:1.2.3.4",         &v6) < 0, "IPv4-embedded form rejected (0.5.1 scope)");
+    assert_eq(ipv6_parse(0, &v6), IPV6_PARSE_FAIL, "null ptr → FAIL");
 
     # ----- cmsg TTL walk -----
     test_group("cmsg ttl walk");

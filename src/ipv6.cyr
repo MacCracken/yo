@@ -1,0 +1,125 @@
+# ipv6.cyr — IPv6 literal parser.
+#
+# Strict parse of RFC 4291 dotted-colon form, packed into a caller-owned
+# 16-byte buffer in network byte order (group 0 high → out[0..1]).
+# Supports zero-group compression (`::` once per address) and case-
+# insensitive hex digits. Rejects scope-IDs (`fe80::1%eth0` — deferred
+# to a later 0.5.x point release) and IPv4-embedded textual form
+# (`::ffff:1.2.3.4` — defer to 0.5.1 when AAAA lookup also lands).
+#
+# Output byte order matches the wire format expected by sockaddr_in6:
+# the kernel's sin6_addr is `struct in6_addr { uint8_t s6_addr[16]; }`
+# in network order. The Linux backend writes our 16 bytes directly into
+# offset 8 of the sockaddr.
+
+var IPV6_PARSE_OK   = 0;
+var IPV6_PARSE_FAIL = 0 - 1;
+
+# Map an ASCII byte to its hex value (0..15) or -1 if not a hex digit.
+fn _ipv6_hexval(c): i64 {
+    if ((c >= 48) && (c <= 57))  { return c - 48; }    # '0'-'9'
+    if ((c >= 97) && (c <= 102)) { return c - 87; }    # 'a'-'f'
+    if ((c >= 65) && (c <= 70))  { return c - 55; }    # 'A'-'F'
+    return 0 - 1;
+}
+
+# Write a 16-bit value as two big-endian bytes at p.
+fn _ipv6_put16_be(p, val): i64 {
+    store8(p,     (val >> 8) & 0xFF);
+    store8(p + 1, val & 0xFF);
+    return 0;
+}
+
+# Parse the IPv6 literal pointed at by `s` into 16 packed bytes at `out`.
+# Returns 0 on success, IPV6_PARSE_FAIL on any rejection. `out` must be
+# at least 16 bytes. Out is not touched on failure (caller can probe
+# for fallthrough to the next resolver path without re-zeroing).
+fn ipv6_parse(s, out): i64 {
+    if (s == 0) { return IPV6_PARSE_FAIL; }
+
+    var groups[64];               # scratch: up to 8 i64 entries holding parsed groups
+    var ng     = 0;
+    var dc_pos = 0 - 1;           # index into groups[] where "::" sits, or -1
+    var i      = 0;
+
+    # Leading "::" must be detected before the parsing loop because the
+    # loop body assumes the next token is always a hex group.
+    if (load8(s) == 58) {
+        if (load8(s + 1) != 58) { return IPV6_PARSE_FAIL; }     # ":x" without "::"
+        dc_pos = 0;
+        i = 2;
+        # "::" alone — empty input after the double colon — produces
+        # the all-zeros address. Skip the parse loop entirely.
+        if (load8(s + i) == 0) {
+            var z = 0;
+            while (z < 16) { store8(out + z, 0); z = z + 1; }
+            return IPV6_PARSE_OK;
+        }
+    }
+
+    var hit_end = 0;
+    while (hit_end == 0) {
+        # Parse 1-4 hex digits into val.
+        var val    = 0;
+        var digits = 0;
+        var c      = load8(s + i);
+        while (1) {
+            var d = _ipv6_hexval(c);
+            if (d < 0) { break; }
+            if (digits == 4) { return IPV6_PARSE_FAIL; }
+            val = (val << 4) | d;
+            digits = digits + 1;
+            i = i + 1;
+            c = load8(s + i);
+        }
+        if (digits == 0) { return IPV6_PARSE_FAIL; }
+        if (ng == 8)     { return IPV6_PARSE_FAIL; }
+        store64(&groups + ng * 8, val);
+        ng = ng + 1;
+
+        if (c == 0) { hit_end = 1; }
+        else {
+            if (c != 58) { return IPV6_PARSE_FAIL; }            # only ':' continues
+            i = i + 1;
+            c = load8(s + i);
+            if (c == 58) {                                       # "::"
+                if (dc_pos >= 0) { return IPV6_PARSE_FAIL; }     # second "::"
+                dc_pos = ng;
+                i = i + 1;
+                if (load8(s + i) == 0) { hit_end = 1; }          # trailing "::"
+            } else {
+                if (c == 0) { return IPV6_PARSE_FAIL; }          # trailing single ':'
+            }
+        }
+    }
+
+    # Expand into out[0..15].
+    if (dc_pos >= 0) {
+        var gap = 8 - ng;
+        if (gap < 1) { return IPV6_PARSE_FAIL; }
+        var w = 0;
+        while (w < dc_pos) {
+            _ipv6_put16_be(out + w * 2, load64(&groups + w * 8));
+            w = w + 1;
+        }
+        var z = 0;
+        while (z < gap) {
+            _ipv6_put16_be(out + (dc_pos + z) * 2, 0);
+            z = z + 1;
+        }
+        var r = dc_pos;
+        while (r < ng) {
+            _ipv6_put16_be(out + (dc_pos + gap + (r - dc_pos)) * 2, load64(&groups + r * 8));
+            r = r + 1;
+        }
+    } else {
+        if (ng != 8) { return IPV6_PARSE_FAIL; }
+        var k = 0;
+        while (k < 8) {
+            _ipv6_put16_be(out + k * 2, load64(&groups + k * 8));
+            k = k + 1;
+        }
+    }
+
+    return IPV6_PARSE_OK;
+}

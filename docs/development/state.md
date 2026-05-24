@@ -2,7 +2,7 @@
 
 > **⚠ NOT A LOG.** Live state with pointers — current truth only. Per-release history → [`../../CHANGELOG.md`](../../CHANGELOG.md). Milestone path → [`roadmap.md`](roadmap.md).
 >
-> **Last refresh**: 2026-05-23 (0.4.3 cut — TTL display, closes 0.4.x).
+> **Last refresh**: 2026-05-23 (0.5.0 cut — IPv6 literal probe).
 
 ---
 
@@ -10,18 +10,29 @@
 
 | Field | Value |
 |---|---|
-| Current version | **0.4.3** — TTL display (fourth 0.4.x item; band complete) |
-| Status | **Linux MVP at POSIX-ping output parity** — `yo router 8.8.8.8 1.1.1.1` runs sequential per-target probes with TTL on each reply line. AGNOS backend pending kernel surface; next milestone is 0.5.x IPv6. |
-| Build size | ~96 KB (Linux MVP + DNS forward+reverse + multi-target + TTL ancillary, pre-DCE; 287 unreachable fns in main, 305 in tests) |
+| Current version | **0.5.0** — IPv6 literal probe (opens the 0.5.x band) |
+| Status | **Linux MVP at POSIX-ping output parity for v4 + v6 literals** — `yo ::1 1.1.1.1 fd81::…` runs mixed-family sequential probes with hop limit / TTL on each reply line. AGNOS backend pending kernel surface; 0.5.1 will add AAAA + IPv6 reverse DNS + `-4` / `-6`. |
+| Build size | ~96 KB (Linux MVP + DNS + multi-target + TTL/hoplimit + IPv6 literal, pre-DCE; 288 unreachable fns in main, ~310 in tests) |
 | Cyrius pin | 6.0.1 |
-| Tests | 187 assertions in `tests/yo.tcyr` — ICMP framing/checksum + CLI parse (incl. `-n`, multi-target) + IPv4 parse + RTT stats + output format + DNS forward+reverse (qname encoders, query builders, response parsers for A and PTR, name decoder w/ pointer guard, resolv.conf parser) + cmsg TTL walker |
+| Tests | 252 assertions in `tests/yo.tcyr` — ICMP/ICMPv6 framing + CLI parse + IPv4/IPv6 parsers + RTT stats + output format + DNS forward+reverse (A/PTR) + cmsg TTL + cmsg hop-limit walker (covered indirectly via the shared cmsg shape — same algorithm as v4) |
 | Iron-validation host | archaemenid (Beelink SER, AMD) — same machine as the agnosticos iron-burn surface |
 | Family position | First entry in network-tools family |
 | Backends | Linux (working) · AGNOS (planned) · Windows/Apple (post-1.0) |
 
 ## In-flight work
 
-**0.4.3 TTL display landed** — `yo 1.1.1.1` now banners `seq=0  ttl=57  rtt=5.83 ms`. Linux's `IP_RECVTTL` socket option is enabled on the ICMP socket; the recv path switched from `recvfrom` to `recvmsg` (syscall 47) to carry the cmsg chain; a pure helper walks the chain to find `(IPPROTO_IP, IP_TTL)`. When the kernel doesn't surface a TTL cmsg (older kernels / SOCK_RAW edge cases) the ttl chunk is omitted gracefully. Modules touched since 0.4.2:
+**0.5.0 IPv6 literal probe landed** — `yo ::1`, `yo 2001:db8::1`, any full eight-group form now run end-to-end against the Linux backend with the same UX as the v4 path. Address family is dispatched per-target so a single invocation can mix v4 and v6 (`yo ::1 1.1.1.1`). On AF_INET6 SOCK_DGRAM ICMPv6 the kernel computes the outbound checksum (we enable `IPV6_CHECKSUM` with offset=2) and surfaces the inbound hop limit via cmsg (we enable `IPV6_RECVHOPLIMIT`). Modules added/touched in 0.5.0:
+
+- `src/ipv6.cyr` — new file. Strict RFC 4291 colon-hex parser, output 16 bytes network-order. Single `::`, 1-4 hex digits per group, case-insensitive. Rejects scope IDs and IPv4-embedded textual form (deferred to 0.5.1).
+- `src/icmp.cyr` — added `ICMPV6_ECHO_REQUEST=128` / `_REPLY=129` + `icmp6_build_echo_request` (wire shape identical to v4, checksum left zero for kernel fill).
+- `src/platform_linux.cyr` — `AF_INET6`, `IPPROTO_IPV6`, `IPPROTO_ICMPV6`, `IPV6_CHECKSUM`, `IPV6_RECVHOPLIMIT`, `IPV6_HOPLIMIT`. New `_lx_sockaddr_in6` (28 B), `_lx_enable_ipv6_checksum`, `_lx_enable_recvhoplimit`, `platform_icmp6_open` / `_send_to` / `_recv_ext`, `_lx_cmsg_find_hoplimit`.
+- `src/probe.cyr` — `probe_run(target, af, addr_arg, banner_parens, ...)` dispatches v4 vs v6 builders/sockets. `addr_arg` is interpreted by `af`: i64 packed for v4, 16-byte pointer for v6.
+- `src/main.cyr` — resolution order: `ipv4_parse` → `ipv6_parse` → `dns_resolve` (A only). Reverse DNS still v4-only.
+- `tests/yo.tcyr` — 65 new assertions across the `ipv6_parse valid` / `ipv6_parse invalid` / `icmp6_build_echo_request` groups.
+
+**Iron-verified**: `yo ::1` (ttl=64, rtt ≤ 0.1 ms), `yo <ula-self>` full eight-group, mixed v4+v6 multi-target. WAN IPv6 (`2001:4860:4860::8888`) not testable from archaemenid — the network has no global v6 route (`ping -6` system tool also returns "Network is unreachable" against the same address). The v6 transmit path is verified end-to-end on loopback + ULA, which exercises every byte of the platform layer.
+
+**0.4.3 TTL display** (carryover) — `yo 1.1.1.1` banners `seq=0  ttl=57  rtt=5.83 ms`. Linux's `IP_RECVTTL` socket option enabled on the ICMP socket; the recv path switched from `recvfrom` to `recvmsg` (syscall 47) to carry the cmsg chain; a pure helper walks the chain to find `(IPPROTO_IP, IP_TTL)`. When the kernel doesn't surface a TTL cmsg (older kernels / SOCK_RAW edge cases) the ttl chunk is omitted gracefully. Modules from 0.4.3:
 
 - `src/platform_linux.cyr` — added `SYS_RECVMSG=47`, `IPPROTO_IP=0`, `IP_TTL=2`, `IP_RECVTTL=12` constants. `_lx_enable_recvttl(fd)` sets the socket option after each successful `socket()`. New `platform_icmp_recv_ext(fd, buf, maxlen, ttl_out)` builds a 56 B msghdr + 16 B iovec + 64 B control buffer, calls recvmsg, walks via `_lx_cmsg_find_ttl(control, controllen)` (pure, unit-tested).
 - `src/probe.cyr` — calls `platform_icmp_recv_ext` instead of `platform_icmp_recv`; holds a `ttl_slot` outside the loop and threads the captured value into `output_reply`.
@@ -54,7 +65,7 @@
 - `src/ipv4.cyr` — strict dotted-quad parser. Matches `agnos/kernel/core/net.cyr:21` `ip4()` packing.
 - `src/stats.cyr` + `src/output.cyr` — RTT accumulator + README-shaped output.
 
-**0.4.x band is now closed.** Next milestone: **0.5.x IPv6** — `src/ipv6.cyr` colon-hex parser, ICMPv6 framing (echo req=128, echo reply=129, pseudo-header checksum), `platform_linux.cyr` gains `AF_INET6` + `sockaddr_in6` builder + `IPPROTO_ICMPV6=58`, CLI gains `-4` / `-6`. AGNOS backend will need an equivalent `platform_icmp_recv_ext`-shaped surface (sovereign cmsg-or-equivalent for TTL/hop-limit), but doesn't block. See [`roadmap.md`](roadmap.md) for the full path to 1.0.
+**0.5.x band opened with 0.5.0**. Next point release **0.5.1** picks up the IPv6 polish: AAAA DNS lookup (so hostnames can resolve to IPv6), `ip6.arpa` PTR reverse-DNS, `-4` / `-6` flags for hostname family forcing, scope IDs (`fe80::1%eth0`), and IPv4-embedded textual form (`::ffff:1.2.3.4`). After that: **0.6.x AGNOS backend** — needs a sovereign equivalent of `platform_icmp_recv_ext` / `platform_icmp6_recv_ext` (cmsg-or-equivalent surface for TTL/hop-limit). See [`roadmap.md`](roadmap.md) for the full path to 1.0.
 
 Pending later:
 - **AGNOS backend** (`src/platform_agnos.cyr`) — pending the kernel ICMP surface in agnos (blocked on r8169 RX-path 5-part bundle iron-validating, Attempt 97 pending). Slots in as a sibling to `platform_linux.cyr` with no changes to `probe.cyr`. Will also need a sovereign UDP surface for the AGNOS-side `dns_resolve`.
@@ -86,6 +97,9 @@ Now that the Linux backend exists, we have a concrete reference for what shape t
 - `platform_icmp_open()` → fd (or sovereign handle). On Linux, also enables `IP_RECVTTL` so recv carries the response TTL.
 - `platform_icmp_send_to(fd, packed_addr, pkt, pkt_len)` → bytes_sent
 - `platform_icmp_recv_ext(fd, buf, maxlen, ttl_out)` → bytes_received, also writes response TTL to `*ttl_out` (0 if unavailable). With SO_RCVTIMEO equivalent for the timeout. *(0.4.3: TTL)*
+- `platform_icmp6_open()` → fd. On Linux, also enables `IPV6_CHECKSUM=2` (kernel fills outbound cksum) and `IPV6_RECVHOPLIMIT`. *(0.5.0: IPv6)*
+- `platform_icmp6_send_to(fd, addr16_ptr, pkt, pkt_len)` → bytes_sent; addr16 is the packed 16-byte network-order destination.
+- `platform_icmp6_recv_ext(fd, buf, maxlen, hop_out)` → bytes_received + writes hop limit (0..255) to `*hop_out` from the IPv6 cmsg chain.
 - `platform_udp_open()` → fd
 - `platform_udp_send_to(fd, packed_addr, port, pkt, pkt_len)` → bytes_sent  *(0.4.0: DNS)*
 - `platform_udp_recv(fd, buf, maxlen)` → bytes_received

@@ -32,15 +32,21 @@ var _LX_SYS_CLOCK_GETTIME   = 228;
 var _LX_SYS_SIGNALFD4       = 289;
 
 var _LX_AF_INET       = 2;
+var _LX_AF_INET6      = 10;
 var _LX_SOCK_DGRAM    = 2;
 var _LX_SOCK_RAW      = 3;
-var _LX_IPPROTO_IP    = 0;
-var _LX_IPPROTO_ICMP  = 1;
-var _LX_IPPROTO_UDP   = 17;
+var _LX_IPPROTO_IP      = 0;
+var _LX_IPPROTO_ICMP    = 1;
+var _LX_IPPROTO_UDP     = 17;
+var _LX_IPPROTO_IPV6    = 41;     # setsockopt level + cmsg_level for v6 ancillary
+var _LX_IPPROTO_ICMPV6  = 58;
 var _LX_SOL_SOCKET    = 1;
 var _LX_SO_RCVTIMEO   = 20;
 var _LX_IP_TTL        = 2;        # cmsg_type when IP_RECVTTL is enabled
 var _LX_IP_RECVTTL    = 12;       # setsockopt: deliver TTL as ancillary
+var _LX_IPV6_CHECKSUM     = 7;    # setsockopt: byte offset of cksum field in icmpv6 msg
+var _LX_IPV6_RECVHOPLIMIT = 51;   # setsockopt: deliver hop limit as ancillary
+var _LX_IPV6_HOPLIMIT     = 52;   # cmsg_type when IPV6_RECVHOPLIMIT is enabled
 var _LX_CLOCK_MONOTONIC = 1;
 var _LX_SIG_BLOCK     = 0;
 var _LX_SIGINT        = 2;
@@ -192,6 +198,122 @@ fn platform_udp_send_to(fd, packed_addr, port, pkt, pkt_len): i64 {
 # about the source address, just the payload.
 fn platform_udp_recv(fd, buf, maxlen): i64 {
     return syscall(_LX_SYS_RECVFROM, fd, buf, maxlen, 0, 0, 0);
+}
+
+# ----- IPv6 / ICMPv6 -----
+#
+# Linux exposes unprivileged ICMPv6 via AF_INET6 + SOCK_DGRAM +
+# IPPROTO_ICMPV6 the same way it exposes ICMPv4 — `ping_group_range`
+# gates both. The kernel computes the ICMPv6 checksum on send when
+# IPV6_CHECKSUM is enabled with the offset of the checksum field
+# (=2). IPV6_RECVHOPLIMIT mirrors IP_RECVTTL: enable it, then recvmsg
+# returns the response hop-limit as an IPV6_HOPLIMIT cmsg.
+
+# Build a sockaddr_in6 (28 bytes) for the given 16-byte IPv6 address
+# (network order, as written by ipv6_parse) and UDP/TCP port (host
+# order; serialized big-endian into sin6_port). Layout:
+#   off 0-1:   sin6_family   (u16)
+#   off 2-3:   sin6_port     (u16 BE)
+#   off 4-7:   sin6_flowinfo (u32, zero)
+#   off 8-23:  sin6_addr     (16 bytes)
+#   off 24-27: sin6_scope_id (u32, zero — link-local scope deferred)
+fn _lx_sockaddr_in6(addr16, port): i64 {
+    var sa = alloc(28);
+    memset(sa, 0, 28);
+    store16(sa, _LX_AF_INET6);
+    store8(sa + 2, (port >> 8) & 0xFF);
+    store8(sa + 3, port & 0xFF);
+    memcpy(sa + 8, addr16, 16);
+    return sa;
+}
+
+# Enable kernel-side ICMPv6 checksum computation. The option value is
+# the byte offset (=2) of the cksum field within the ICMPv6 message
+# we'll be sending.
+fn _lx_enable_ipv6_checksum(fd): i64 {
+    var off = alloc(4);
+    store32(off, 2);
+    return syscall(_LX_SYS_SETSOCKOPT, fd, _LX_IPPROTO_IPV6, _LX_IPV6_CHECKSUM, off, 4);
+}
+
+# Enable IPV6_RECVHOPLIMIT so recvmsg surfaces the response hop-limit
+# as ancillary (cmsg_level=IPPROTO_IPV6, cmsg_type=IPV6_HOPLIMIT).
+fn _lx_enable_recvhoplimit(fd): i64 {
+    var one = alloc(4);
+    store32(one, 1);
+    return syscall(_LX_SYS_SETSOCKOPT, fd, _LX_IPPROTO_IPV6, _LX_IPV6_RECVHOPLIMIT, one, 4);
+}
+
+# Open an ICMPv6 socket. Tries unprivileged SOCK_DGRAM first; falls
+# back to SOCK_RAW. On success, enables IPV6_CHECKSUM + IPV6_RECVHOPLIMIT
+# so the kernel both fills our outbound checksum and surfaces the
+# inbound hop limit to platform_icmp6_recv_ext.
+fn platform_icmp6_open(): i64 {
+    var fd = syscall(_LX_SYS_SOCKET, _LX_AF_INET6, _LX_SOCK_DGRAM, _LX_IPPROTO_ICMPV6);
+    if (fd >= 0) {
+        _lx_enable_ipv6_checksum(fd);
+        _lx_enable_recvhoplimit(fd);
+        return fd;
+    }
+    var fd2 = syscall(_LX_SYS_SOCKET, _LX_AF_INET6, _LX_SOCK_RAW, _LX_IPPROTO_ICMPV6);
+    if (fd2 >= 0) {
+        _lx_enable_ipv6_checksum(fd2);
+        _lx_enable_recvhoplimit(fd2);
+    }
+    return fd2;
+}
+
+# sendto over ICMPv6. addr16 is the packed 16-byte IPv6 destination
+# (network order, from ipv6_parse). Returns bytes sent or negative errno.
+fn platform_icmp6_send_to(fd, addr16, pkt, pkt_len): i64 {
+    var sa = _lx_sockaddr_in6(addr16, 0);
+    return syscall(_LX_SYS_SENDTO, fd, pkt, pkt_len, 0, sa, 28);
+}
+
+# Walk a cmsg buffer for the IPv6 hop limit (level=IPPROTO_IPV6,
+# type=IPV6_HOPLIMIT). Same structure walker as _lx_cmsg_find_ttl —
+# kept separate because the (level, type) pair differs and inlining
+# the IPv6 version reads cleaner than parameterizing.
+fn _lx_cmsg_find_hoplimit(control, controllen): i64 {
+    var off = 0;
+    while (off + 16 <= controllen) {
+        var clen  = load64(control + off);
+        if (clen < 16) { return 0; }
+        var level = load32(control + off + 8);
+        var type  = load32(control + off + 12);
+        if (level == _LX_IPPROTO_IPV6 && type == _LX_IPV6_HOPLIMIT) {
+            return load32(control + off + 16) & 0xFF;
+        }
+        var step = ((clen + 7) >> 3) << 3;
+        if (step <= 0) { return 0; }
+        off = off + step;
+    }
+    return 0;
+}
+
+# recvmsg-based recv that also surfaces the IPv6 response hop limit.
+# Same shape as platform_icmp_recv_ext but parses the IPv6 cmsg pair.
+fn platform_icmp6_recv_ext(fd, buf, maxlen, hop_out): i64 {
+    var ctlcap = 64;
+    var ctl    = alloc(ctlcap);
+    var iov    = alloc(16);
+    store64(iov,     buf);
+    store64(iov + 8, maxlen);
+
+    var mh = alloc(56);
+    memset(mh, 0, 56);
+    store64(mh + 16, iov);
+    store64(mh + 24, 1);
+    store64(mh + 32, ctl);
+    store64(mh + 40, ctlcap);
+
+    var n = syscall(_LX_SYS_RECVMSG, fd, mh, 0);
+    store64(hop_out, 0);
+    if (n < 0) { return n; }
+
+    var ctllen = load64(mh + 40);
+    store64(hop_out, _lx_cmsg_find_hoplimit(ctl, ctllen));
+    return n;
 }
 
 # Read up to maxlen bytes from path into buf. Returns bytes read on

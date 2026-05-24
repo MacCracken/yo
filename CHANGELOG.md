@@ -4,6 +4,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-05-23
+
+IPv6 literal probe. `yo ::1`, `yo 2001:db8::1`, and any full eight-group form now run end-to-end ICMPv6 against the Linux backend with the same UX as the v4 path (banner + per-packet hop limit + summary, multi-target dispatch, `-c`/`-W`/`-i`/`-s`/`-q`/`-n` flags). The probe loop dispatches on address family per-target; v4 and v6 targets can mix in a single invocation (`yo ::1 1.1.1.1`).
+
+### Added
+- `src/ipv6.cyr` — strict RFC 4291 colon-hex parser. Single allowed `::`, 1-4 hex digits per group, case-insensitive, output is 16 packed bytes in network byte order. Rejects scope IDs (`fe80::1%eth0`) and IPv4-embedded textual form (`::ffff:1.2.3.4`) — both deferred to 0.5.1.
+- `src/icmp.cyr` — `ICMPV6_ECHO_REQUEST=128`, `ICMPV6_ECHO_REPLY=129`, `icmp6_build_echo_request(buf, ident, seq, payload, len)`. Wire shape identical to ICMPv4 minus the checksum work; the kernel fills the cksum field on AF_INET6 SOCK_DGRAM when `IPV6_CHECKSUM` is enabled with offset=2.
+- `src/platform_linux.cyr` — IPv6 constants (`AF_INET6=10`, `IPPROTO_IPV6=41`, `IPPROTO_ICMPV6=58`, `IPV6_CHECKSUM=7`, `IPV6_RECVHOPLIMIT=51`, `IPV6_HOPLIMIT=52`). New primitives: `_lx_sockaddr_in6(addr16, port)` builds the 28 B sockaddr; `_lx_enable_ipv6_checksum(fd)` sets the kernel-checksum offset; `_lx_enable_recvhoplimit(fd)` opts into hop-limit ancillary; `platform_icmp6_open` / `platform_icmp6_send_to` / `platform_icmp6_recv_ext` mirror the v4 trio; `_lx_cmsg_find_hoplimit` walks the cmsg chain for `(IPPROTO_IPV6, IPV6_HOPLIMIT)`.
+- `src/probe.cyr` — `probe_run(target, af, addr_arg, banner_parens, ...)` now takes an address-family selector; v4 passes a packed u32 in `addr_arg`, v6 passes a pointer to 16 packed bytes. ICMP framing, send, recv, and reply-type acceptance all branch on `af`.
+- `src/main.cyr` — resolution order per target: `ipv4_parse` → `ipv6_parse` → `dns_resolve` (A only). Reverse DNS only runs on the v4 path for this release.
+- `tests/yo.tcyr` — 65 new assertions (252 total): 52 covering `ipv6_parse` (happy paths for `::`, `::1`, `1::`, `2001:db8::1`, full 8-group, uppercase + mixed case, trailing `::`, Google v6; rejects for empty, single-colon, leading/trailing single colon, double `::`, 5-digit group, 7-group-without-`::`, 9-group, `::` with full 8 groups, non-hex digit, scope-id, IPv4-embedded, null ptr) plus 13 covering `icmp6_build_echo_request` byte placement.
+
+### Iron-verified
+- `yo ::1` → ttl=64, rtt ≤ 0.1 ms.
+- `yo <ula-self>` (`fd81:…:e425`) → ttl=64, rtt ≤ 0.1 ms — full eight-group hex parse.
+- `yo ::1 <ula> 127.0.0.1` mixed v4+v6 → all three respond, exit 0.
+- WAN IPv6 (`2001:4860:4860::8888`) was not reachable from the iron-validation host (no global v6 route on this network — confirmed by system `ping -6` also returning `Network is unreachable`); the v6 send path itself is exercised end-to-end on link-local + ULA + loopback.
+
+### Deferred to 0.5.1
+- AAAA DNS lookup for hostnames (`yo google.com` continues to resolve to IPv4 only).
+- IPv6 reverse DNS (PTR via `nibble.…ip6.arpa.`).
+- `-4` / `-6` flags to force address family when a hostname could resolve to both.
+- Scope IDs (`fe80::1%eth0`) and IPv4-embedded textual form (`::ffff:1.2.3.4`).
+
 ## [0.4.3] — 2026-05-23
 
 TTL / hop-limit display. Per-packet output now shows the response TTL between `seq=` and `rtt=` — fourth and final item in the 0.4.x band. With this, yo has POSIX-ping output parity on the Linux backend; next milestone is 0.5.x IPv6.

@@ -22,8 +22,14 @@ fn _probe_fill_payload(buf, n): i64 {
 # `banner_parens` is a cstr displayed in parentheses on the banner (the
 # resolved IP for hostname targets, or the reverse-DNS name for literal
 # IPs), or 0 to suppress.
-fn probe_run(target_cstr, packed_addr, banner_parens, count, timeout_ms, interval_ms, size, quiet): i64 {
-    var fd = platform_icmp_open();
+#
+# `af` selects address family: 4 → IPv4 (addr_arg is packed u32), 6 →
+# IPv6 (addr_arg is a pointer to 16 packed bytes). On v6, the kernel
+# fills the ICMPv6 checksum on send and surfaces hop limit via cmsg.
+fn probe_run(target_cstr, af, addr_arg, banner_parens, count, timeout_ms, interval_ms, size, quiet): i64 {
+    var fd = 0;
+    if (af == 6) { fd = platform_icmp6_open(); }
+    else         { fd = platform_icmp_open(); }
     if (fd < 0) {
         var msg = "yo: cannot open ICMP socket — try adjusting /proc/sys/net/ipv4/ping_group_range or run with CAP_NET_RAW\n";
         syscall(_LX_SYS_WRITE, 2, msg, strlen(msg));
@@ -54,25 +60,34 @@ fn probe_run(target_cstr, packed_addr, banner_parens, count, timeout_ms, interva
     var seq = 0;
     while (seq < count) {
         if (platform_check_interrupted(sigfd) == 1) { break; }
-        var pkt_len = icmp_build_echo_request(pkt, ident, seq, payload, size);
+
+        var pkt_len = 0;
+        if (af == 6) { pkt_len = icmp6_build_echo_request(pkt, ident, seq, payload, size); }
+        else         { pkt_len = icmp_build_echo_request (pkt, ident, seq, payload, size); }
 
         var t0 = platform_now_us();
-        var sent = platform_icmp_send_to(fd, packed_addr, pkt, pkt_len);
+        var sent = 0;
+        if (af == 6) { sent = platform_icmp6_send_to(fd, addr_arg, pkt, pkt_len); }
+        else         { sent = platform_icmp_send_to (fd, addr_arg, pkt, pkt_len); }
+
         if (sent < 0) {
             stats_record_loss(s);
             if (quiet == 0) { output_timeout(seq); }
         } else {
-            var n = platform_icmp_recv_ext(fd, rxbuf, rxcap, ttl_slot);
+            var n = 0;
+            if (af == 6) { n = platform_icmp6_recv_ext(fd, rxbuf, rxcap, ttl_slot); }
+            else         { n = platform_icmp_recv_ext (fd, rxbuf, rxcap, ttl_slot); }
             var t1 = platform_now_us();
             if (n < ICMP_HEADER_LEN) {
                 stats_record_loss(s);
                 if (quiet == 0) { output_timeout(seq); }
             } else {
-                # Accept any ICMP echo reply. SOCK_DGRAM filters the
-                # socket-managed ident on our behalf; on SOCK_RAW we
-                # accept the first matching frame (good enough for v0;
-                # reorder/dedupe is a 0.4.x concern).
-                if (icmp_type(rxbuf) != ICMP_ECHO_REPLY) {
+                # Accept any echo reply for our family. SOCK_DGRAM
+                # filters the socket-managed ident on our behalf; on
+                # SOCK_RAW we accept the first matching frame.
+                var expected_reply = ICMP_ECHO_REPLY;
+                if (af == 6) { expected_reply = ICMPV6_ECHO_REPLY; }
+                if (icmp_type(rxbuf) != expected_reply) {
                     stats_record_loss(s);
                     if (quiet == 0) { output_timeout(seq); }
                 } else {

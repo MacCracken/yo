@@ -4,6 +4,7 @@
 include "src/icmp.cyr"
 include "src/cli.cyr"
 include "src/ipv4.cyr"
+include "src/ipv6.cyr"
 include "src/stats.cyr"
 include "src/output.cyr"
 include "src/platform.cyr"
@@ -58,7 +59,13 @@ fn main() {
     #   2 if no replies AND at least one target hit an error (unresolvable host,
     #     socket open failure)
     #   1 otherwise (every target was reachable but lost every packet)
+    #
+    # Address-family dispatch per target: try ipv4_parse first, then
+    # ipv6_parse, then dns_resolve (A only). AAAA lookup + -4/-6 flags
+    # land in 0.5.1. Reverse DNS only runs on the v4 path for now;
+    # ip6.arpa PTR lookups also land in 0.5.1.
     var parens_buf = alloc(256);
+    var v6buf      = alloc(16);
     var n_targets = cli_target_count(reg);
     var any_reply = 0;
     var any_error = 0;
@@ -67,31 +74,44 @@ fn main() {
         var target = cli_target_at(reg, i);
         if ((i > 0) && (cli_quiet(reg) == 0)) { _emit_lf(1); }
 
-        var addr = ipv4_parse(target);
-        var parens = 0;
-        if (addr < 0) {
-            addr = dns_resolve(target);
-            if (addr < 0) {
-                _eputs("yo: cannot resolve host: ");
-                _eputs(target);
-                _emit_lf(2);
-                any_error = 1;
-                i = i + 1;
-                continue;
-            }
-            output_ipv4_to_buf(addr, parens_buf);
-            parens = parens_buf;
-        } else {
+        var af       = 4;
+        var addr_arg = 0;
+        var parens   = 0;
+
+        var v4 = ipv4_parse(target);
+        if (v4 >= 0) {
+            af = 4;
+            addr_arg = v4;
             if (cli_numeric(reg) == 0) {
-                if (dns_reverse_resolve(addr, parens_buf, 256) > 0) {
+                if (dns_reverse_resolve(v4, parens_buf, 256) > 0) {
                     parens = parens_buf;
                 }
+            }
+        } else {
+            if (ipv6_parse(target, v6buf) == 0) {
+                af = 6;
+                addr_arg = v6buf;
+            } else {
+                var v4d = dns_resolve(target);
+                if (v4d < 0) {
+                    _eputs("yo: cannot resolve host: ");
+                    _eputs(target);
+                    _emit_lf(2);
+                    any_error = 1;
+                    i = i + 1;
+                    continue;
+                }
+                af = 4;
+                addr_arg = v4d;
+                output_ipv4_to_buf(v4d, parens_buf);
+                parens = parens_buf;
             }
         }
 
         var rrc = probe_run(
             target,
-            addr,
+            af,
+            addr_arg,
             parens,
             cli_count(reg),
             cli_timeout_ms(reg),
