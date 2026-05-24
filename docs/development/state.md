@@ -2,7 +2,7 @@
 
 > **⚠ NOT A LOG.** Live state with pointers — current truth only. Per-release history → [`../../CHANGELOG.md`](../../CHANGELOG.md). Milestone path → [`roadmap.md`](roadmap.md).
 >
-> **Last refresh**: 2026-05-23 (0.4.2 cut — multiple targets).
+> **Last refresh**: 2026-05-23 (0.4.3 cut — TTL display, closes 0.4.x).
 
 ---
 
@@ -10,18 +10,25 @@
 
 | Field | Value |
 |---|---|
-| Current version | **0.4.2** — multiple targets (third 0.4.x item) |
-| Status | **Linux MVP + DNS + multi-target working** — `yo router 8.8.8.8 1.1.1.1` runs sequential per-target probes with a combined exit code. AGNOS backend pending kernel surface. |
-| Build size | ~96 KB (Linux MVP + DNS forward+reverse + multi-target, pre-DCE; 286 unreachable fns in main, 304 in tests) |
+| Current version | **0.4.3** — TTL display (fourth 0.4.x item; band complete) |
+| Status | **Linux MVP at POSIX-ping output parity** — `yo router 8.8.8.8 1.1.1.1` runs sequential per-target probes with TTL on each reply line. AGNOS backend pending kernel surface; next milestone is 0.5.x IPv6. |
+| Build size | ~96 KB (Linux MVP + DNS forward+reverse + multi-target + TTL ancillary, pre-DCE; 287 unreachable fns in main, 305 in tests) |
 | Cyrius pin | 6.0.1 |
-| Tests | 181 assertions in `tests/yo.tcyr` — ICMP framing/checksum + CLI parse (incl. `-n`, multi-target) + IPv4 parse + RTT stats + output format + DNS forward+reverse (qname encoders, query builders, response parsers for A and PTR, name decoder w/ pointer guard, resolv.conf parser) |
+| Tests | 187 assertions in `tests/yo.tcyr` — ICMP framing/checksum + CLI parse (incl. `-n`, multi-target) + IPv4 parse + RTT stats + output format + DNS forward+reverse (qname encoders, query builders, response parsers for A and PTR, name decoder w/ pointer guard, resolv.conf parser) + cmsg TTL walker |
 | Iron-validation host | archaemenid (Beelink SER, AMD) — same machine as the agnosticos iron-burn surface |
 | Family position | First entry in network-tools family |
 | Backends | Linux (working) · AGNOS (planned) · Windows/Apple (post-1.0) |
 
 ## In-flight work
 
-**0.4.2 multiple targets landed** — `yo router 8.8.8.8 1.1.1.1` runs each target sequentially with its own banner + summary block, separated by a blank line (non-quiet mode). Unresolvable hosts in the list no longer abort the run; stderr emits `yo: cannot resolve host: <name>` and the loop continues. Aggregate exit code: `0` if any target had any reply, `2` if no replies and any target hit a resolve/socket error, `1` otherwise. Modules touched since 0.4.1:
+**0.4.3 TTL display landed** — `yo 1.1.1.1` now banners `seq=0  ttl=57  rtt=5.83 ms`. Linux's `IP_RECVTTL` socket option is enabled on the ICMP socket; the recv path switched from `recvfrom` to `recvmsg` (syscall 47) to carry the cmsg chain; a pure helper walks the chain to find `(IPPROTO_IP, IP_TTL)`. When the kernel doesn't surface a TTL cmsg (older kernels / SOCK_RAW edge cases) the ttl chunk is omitted gracefully. Modules touched since 0.4.2:
+
+- `src/platform_linux.cyr` — added `SYS_RECVMSG=47`, `IPPROTO_IP=0`, `IP_TTL=2`, `IP_RECVTTL=12` constants. `_lx_enable_recvttl(fd)` sets the socket option after each successful `socket()`. New `platform_icmp_recv_ext(fd, buf, maxlen, ttl_out)` builds a 56 B msghdr + 16 B iovec + 64 B control buffer, calls recvmsg, walks via `_lx_cmsg_find_ttl(control, controllen)` (pure, unit-tested).
+- `src/probe.cyr` — calls `platform_icmp_recv_ext` instead of `platform_icmp_recv`; holds a `ttl_slot` outside the loop and threads the captured value into `output_reply`.
+- `src/output.cyr` — `output_reply(seq, ttl, rtt)`; inserts `  ttl=T` between `seq=` and `rtt=` when `ttl > 0`.
+- `tests/yo.tcyr` — new `cmsg ttl walk` group with 6 assertions.
+
+**0.4.2 multiple targets** (carryover) — `yo router 8.8.8.8 1.1.1.1` runs each target sequentially with its own banner + summary block, separated by a blank line (non-quiet mode). Unresolvable hosts in the list no longer abort the run; stderr emits `yo: cannot resolve host: <name>` and the loop continues. Aggregate exit code: `0` if any target had any reply, `2` if no replies and any target hit a resolve/socket error, `1` otherwise. Modules from 0.4.2:
 
 - `src/main.cyr` — the resolve + `probe_run` block is now wrapped in `while (i < cli_target_count(reg))`. Tracks `any_reply` / `any_error` flags to compose the final exit code. Reuses a single `parens_buf` across iterations; the DNS path overwrites in place.
 - `src/cli.cyr` — added `cli_target_count(reg)` and `cli_target_at(reg, idx)`. Usage line updated to `<host> [host ...]`. Registry layout unchanged (72 B).
@@ -47,7 +54,7 @@
 - `src/ipv4.cyr` — strict dotted-quad parser. Matches `agnos/kernel/core/net.cyr:21` `ip4()` packing.
 - `src/stats.cyr` + `src/output.cyr` — RTT accumulator + README-shaped output.
 
-Next milestone in the **0.4.x band**: TTL/hop-limit display (cmsg via `IP_RECVTTL` on SOCK_DGRAM, requires switching `platform_icmp_recv` from `recvfrom` to `recvmsg` to carry the ancillary data). Linux-backend work; the AGNOS backend will need an equivalent surface but doesn't block the Linux ship. After that, **0.5.x IPv6**. See [`roadmap.md`](roadmap.md) for the full path to 1.0.
+**0.4.x band is now closed.** Next milestone: **0.5.x IPv6** — `src/ipv6.cyr` colon-hex parser, ICMPv6 framing (echo req=128, echo reply=129, pseudo-header checksum), `platform_linux.cyr` gains `AF_INET6` + `sockaddr_in6` builder + `IPPROTO_ICMPV6=58`, CLI gains `-4` / `-6`. AGNOS backend will need an equivalent `platform_icmp_recv_ext`-shaped surface (sovereign cmsg-or-equivalent for TTL/hop-limit), but doesn't block. See [`roadmap.md`](roadmap.md) for the full path to 1.0.
 
 Pending later:
 - **AGNOS backend** (`src/platform_agnos.cyr`) — pending the kernel ICMP surface in agnos (blocked on r8169 RX-path 5-part bundle iron-validating, Attempt 97 pending). Slots in as a sibling to `platform_linux.cyr` with no changes to `probe.cyr`. Will also need a sovereign UDP surface for the AGNOS-side `dns_resolve`.
@@ -76,9 +83,9 @@ The AGNOS backend (future `src/platform_agnos.cyr`) will depend on a Cyrius-nati
 
 Now that the Linux backend exists, we have a concrete reference for what shape the AGNOS surface needs. The Linux call sites in `src/probe.cyr` and `src/dns.cyr` use:
 
-- `platform_icmp_open()` → fd (or sovereign handle)
+- `platform_icmp_open()` → fd (or sovereign handle). On Linux, also enables `IP_RECVTTL` so recv carries the response TTL.
 - `platform_icmp_send_to(fd, packed_addr, pkt, pkt_len)` → bytes_sent
-- `platform_icmp_recv(fd, buf, maxlen)` → bytes_received (with SO_RCVTIMEO equivalent for the timeout)
+- `platform_icmp_recv_ext(fd, buf, maxlen, ttl_out)` → bytes_received, also writes response TTL to `*ttl_out` (0 if unavailable). With SO_RCVTIMEO equivalent for the timeout. *(0.4.3: TTL)*
 - `platform_udp_open()` → fd
 - `platform_udp_send_to(fd, packed_addr, port, pkt, pkt_len)` → bytes_sent  *(0.4.0: DNS)*
 - `platform_udp_recv(fd, buf, maxlen)` → bytes_received

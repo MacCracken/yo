@@ -590,6 +590,57 @@ fn main() {
     cli_parse_argv(reg_m3, 2, av_m3);
     assert_eq(cli_target_count(reg_m3), 1, "single target → count=1");
 
+    # ----- cmsg TTL walk -----
+    test_group("cmsg ttl walk");
+
+    # Single IP_TTL cmsg: cmsg_len=20 (header 16 + i32 data 4), level=0,
+    # type=2, data=58 → returns 58.
+    var c1[32];
+    store64(&c1 + 0,  20);              # cmsg_len
+    store32(&c1 + 8,  _LX_IPPROTO_IP);  # level = 0
+    store32(&c1 + 12, _LX_IP_TTL);      # type  = 2
+    store32(&c1 + 16, 58);              # data  = 58
+    assert_eq(_lx_cmsg_find_ttl(&c1, 24), 58, "single IP_TTL cmsg → 58");
+
+    # Non-matching level (SOL_SOCKET=1, SO_TIMESTAMP=29 placeholder) →
+    # 0. Avoids false positives when the kernel surfaces other cmsg.
+    var c2[32];
+    store64(&c2 + 0,  20);
+    store32(&c2 + 8,  1);
+    store32(&c2 + 12, 29);
+    store32(&c2 + 16, 99);
+    assert_eq(_lx_cmsg_find_ttl(&c2, 24), 0, "non-IP cmsg ignored");
+
+    # Chain: non-matching cmsg first (24 B aligned), IP_TTL second.
+    # Walker must skip past the first via CMSG_ALIGN(20)=24, then read.
+    var c3[64];
+    store64(&c3 + 0,  20);
+    store32(&c3 + 8,  1);
+    store32(&c3 + 12, 29);
+    store32(&c3 + 16, 0);
+    store64(&c3 + 24, 20);              # second cmsg starts at off 24
+    store32(&c3 + 32, _LX_IPPROTO_IP);
+    store32(&c3 + 36, _LX_IP_TTL);
+    store32(&c3 + 40, 64);
+    assert_eq(_lx_cmsg_find_ttl(&c3, 48), 64, "second-in-chain IP_TTL");
+
+    # Truncated buffer (only 8 B of a 20 B cmsg) → 0. Walker must not
+    # read past controllen.
+    var c4[16];
+    store64(&c4 + 0, 20);
+    assert_eq(_lx_cmsg_find_ttl(&c4, 8), 0, "truncated cmsg → 0");
+
+    # Malformed: cmsg_len below header size → reject, return 0.
+    var c5[32];
+    store64(&c5 + 0,  8);               # < 16 (header alone is 16)
+    store32(&c5 + 8,  _LX_IPPROTO_IP);
+    store32(&c5 + 12, _LX_IP_TTL);
+    assert_eq(_lx_cmsg_find_ttl(&c5, 32), 0, "cmsg_len < 16 rejected");
+
+    # Empty control buffer → 0.
+    var c6[8];
+    assert_eq(_lx_cmsg_find_ttl(&c6, 0), 0, "empty control → 0");
+
     return assert_summary();
 }
 

@@ -49,6 +49,7 @@ fn probe_run(target_cstr, packed_addr, banner_parens, count, timeout_ms, interva
     if (quiet == 0) { output_banner(target_cstr, banner_parens, size); }
 
     var sigfd = platform_install_interrupt_watch();
+    var ttl_slot = alloc(8);
 
     var seq = 0;
     while (seq < count) {
@@ -61,7 +62,7 @@ fn probe_run(target_cstr, packed_addr, banner_parens, count, timeout_ms, interva
             stats_record_loss(s);
             if (quiet == 0) { output_timeout(seq); }
         } else {
-            var n = platform_icmp_recv(fd, rxbuf, rxcap);
+            var n = platform_icmp_recv_ext(fd, rxbuf, rxcap, ttl_slot);
             var t1 = platform_now_us();
             if (n < ICMP_HEADER_LEN) {
                 stats_record_loss(s);
@@ -77,7 +78,7 @@ fn probe_run(target_cstr, packed_addr, banner_parens, count, timeout_ms, interva
                 } else {
                     var rtt = t1 - t0;
                     stats_record_reply(s, rtt);
-                    if (quiet == 0) { output_reply(seq, rtt); }
+                    if (quiet == 0) { output_reply(seq, load64(ttl_slot), rtt); }
                 }
             }
         }

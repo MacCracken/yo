@@ -4,6 +4,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.3] — 2026-05-23
+
+TTL / hop-limit display. Per-packet output now shows the response TTL between `seq=` and `rtt=` — fourth and final item in the 0.4.x band. With this, yo has POSIX-ping output parity on the Linux backend; next milestone is 0.5.x IPv6.
+
+### Added
+- `src/platform_linux.cyr` — `IP_RECVTTL` enabled via `_lx_enable_recvttl(fd)` right after each successful `socket()` (both SOCK_DGRAM and SOCK_RAW). New `platform_icmp_recv_ext(fd, buf, maxlen, ttl_out)` switches the recv path from `recvfrom` to `recvmsg` (syscall 47): builds a 56 B `msghdr` + 16 B `iovec` + 64 B ancillary control buffer, calls recvmsg, and writes the TTL into `*ttl_out` (0 when absent). The pure helper `_lx_cmsg_find_ttl(control, controllen)` walks the cmsg chain looking for `(IPPROTO_IP, IP_TTL)`; CMSG_ALIGN performed inline as `((clen + 7) >> 3) << 3`.
+- `src/output.cyr` — `output_reply` gains a `ttl` parameter; renders `  seq=N  ttl=T  rtt=X.XX ms\n` when `ttl > 0`, omits the chunk gracefully otherwise (older kernels / non-Linux backends without ancillary TTL).
+- `src/probe.cyr` — allocates a one-slot `ttl_slot` outside the probe loop, passes it to `platform_icmp_recv_ext`, then forwards the value to `output_reply`.
+- `tests/yo.tcyr` — 6 new assertions (187 total) in the `cmsg ttl walk` group: single IP_TTL cmsg returns the value, non-matching level/type returns 0, second-in-chain walk respects CMSG_ALIGN(20)=24, truncated buffer rejected, `cmsg_len < 16` rejected, empty buffer returns 0.
+
+### Behavior
+- The `platform_icmp_recv` (recvfrom-only) function is retained but no longer used by the probe loop — it's kept as a thin primitive for any future caller that doesn't need ancillary data.
+
+### Fixed
+- Stray output (e.g. `570x`, `130x`, `610x`) between targets in multi-target mode and a missing/garbled trailing newline in two other sites (`yo: cannot resolve host: <name>` on stderr, and `output_summary`'s all-packets-lost branch). Root cause: under the current Cyrius toolchain, a 1-byte string literal `"\n"` passed alone to `syscall(1, fd, "\n", 1)` / `_puts("\n")` mis-binds, with strlen reading past the intended byte. Multi-character literals containing `\n` (e.g. `" ms\n"`, `"\nA"`) render correctly. Workaround: small `_emit_lf(fd)` helper in main.cyr (and an inline equivalent in output.cyr) that writes the LF byte from a stack scratch buffer. The pre-existing buggy sites had been latent since 0.3.0 (`output_summary` all-lost branch) and 0.4.0 (resolve-failure stderr); the 0.4.2 inter-target separator surfaced the visible regression that drove the diagnosis.
+
 ## [0.4.2] — 2026-05-23
 
 Multiple targets. `yo router 8.8.8.8 1.1.1.1` now runs sequential per-target probes with a combined exit code — third item in the 0.4.x band.

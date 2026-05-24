@@ -1,6 +1,6 @@
 # yo — Roadmap
 
-> **Status**: Active | **Last Updated**: 2026-05-23 (post 0.4.2 multiple targets)
+> **Status**: Active | **Last Updated**: 2026-05-23 (post 0.4.3 TTL — closes 0.4.x band)
 >
 > Milestone path from scaffold through v1.0 (POSIX-ping feature parity, multi-backend). Per first-party-documentation roadmap shape: **Completed** / **Backlog** / **Future** / **v1.0 criteria**.
 >
@@ -19,6 +19,7 @@
 | **0.4.0** | 2026-05-23 | **DNS resolution.** `yo <hostname>` works end-to-end. `src/dns.cyr` — RFC 1035 A-record resolver: QNAME encoder, query builder, response parser (compressed-pointer NAMEs, skips CNAMEs to first A record), `/etc/resolv.conf` line parser, fallback to `1.1.1.1`. UDP primitives + `platform_read_file` added to `platform_linux.cyr`. Banner shows `yo google.com (142.x.y.z)` when DNS was used. NXDOMAIN exits 2 with `yo: cannot resolve host: <name>`. 133 unit assertions (+46). |
 | **0.4.1** | 2026-05-23 | **Reverse DNS.** `yo 8.8.8.8` now banners as `yo 8.8.8.8 (dns.google) — 56 bytes`. `dns_reverse_resolve` issues a PTR query against `D.C.B.A.in-addr.arpa.` with 1 s timeout / 1 attempt. New helpers: `_dns_build_reverse_qname`, `_dns_build_ptr_query`, `_dns_decode_name` (compressed-pointer-aware with 16-jump loop guard), `_dns_parse_ptr_response`. Factored `_dns_walk_to_type` shared by forward+reverse parsers. `-n` / `--numeric` CLI flag suppresses the lookup. 169 unit assertions (+36). |
 | **0.4.2** | 2026-05-23 | **Multiple targets.** `yo router 8.8.8.8 1.1.1.1` runs each target sequentially with its own banner + summary block; non-quiet mode separates them with a blank line. Unresolvable hosts no longer abort — error to stderr, continue to next target. Aggregate exit: `0` if any target had any reply, `2` on resolve/socket error with no replies, `1` otherwise. New accessors: `cli_target_count`, `cli_target_at`. 181 unit assertions (+12). |
+| **0.4.3** | 2026-05-23 | **TTL display.** Per-packet output now shows the response TTL: `seq=0  ttl=57  rtt=5.83 ms`. `IP_RECVTTL` socket option enabled in `platform_icmp_open`; new `platform_icmp_recv_ext(fd, buf, maxlen, ttl_out)` switches to `recvmsg` (syscall 47) and walks the ancillary cmsg chain via the pure helper `_lx_cmsg_find_ttl`. `output_reply` gains a `ttl` parameter — chunk omitted gracefully when 0. Closes the 0.4.x band; next milestone is 0.5.x IPv6. 187 unit assertions (+6). |
 
 ---
 
@@ -34,7 +35,7 @@ Everything in this band is achievable on the Linux backend alone — no new plat
 - [x] **Stable banner on hostname target** — landed in 0.4.0. `yo google.com` now produces `yo google.com (142.x.y.z) — 56 bytes` and probes normally; NXDOMAIN exits 2 with `yo: cannot resolve host: <name>`.
 - [x] **Reverse DNS lookup** — landed in 0.4.1. PTR query against `D.C.B.A.in-addr.arpa.` with compressed-name decoder; banner shows `yo 8.8.8.8 (dns.google) — 56 bytes` when a PTR exists. `-n` / `--numeric` flag suppresses the lookup.
 - [x] **Multiple targets** (`yo router 8.8.8.8`) — landed in 0.4.2. Sequential per-target probe with own banner + summary; aggregate exit code (`0` any-reply / `2` any-error-no-reply / `1` otherwise). Unresolvable hosts log to stderr and don't abort the run.
-- [ ] **TTL / hop-limit display** in per-packet output (read from response IP header on SOCK_RAW; from cmsg on SOCK_DGRAM via `IP_RECVTTL`).
+- [x] **TTL / hop-limit display** — landed in 0.4.3. `IP_RECVTTL` enabled on the socket; `recvmsg`-based `platform_icmp_recv_ext` walks the cmsg chain for `(IPPROTO_IP, IP_TTL)`. Per-packet output renders `seq=N  ttl=T  rtt=X.XX ms`; chunk omitted gracefully when the kernel doesn't surface a TTL cmsg.
 
 ### 0.5.x — IPv6
 
