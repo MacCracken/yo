@@ -4,6 +4,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- Toolchain pin bumped `cyrius = "6.0.1"` → `"6.0.51"` in `cyrius.cyml` (resolves the wrapper-vs-manifest drift; installed toolchain was already 6.0.51). Build + all 365 test assertions green on 6.0.51, no source changes required.
+
 ## [0.5.2] — 2026-05-23
 
 IPv6 tail items from 0.5.1. Scope IDs (`fe80::1%eth0`) for link-local probing and the IPv4-embedded textual form (`::ffff:1.2.3.4`, `2001:db8::1.2.3.4`, `0:0:0:0:0:ffff:1.2.3.4`) for the parser and the RFC 5952 §5 output formatter. v4-mapped destinations dispatch through the IPv4 socket path because ICMPv6 can't carry a v4 probe.

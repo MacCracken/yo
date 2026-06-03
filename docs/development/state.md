@@ -2,7 +2,7 @@
 
 > **⚠ NOT A LOG.** Live state with pointers — current truth only. Per-release history → [`../../CHANGELOG.md`](../../CHANGELOG.md). Milestone path → [`roadmap.md`](roadmap.md).
 >
-> **Last refresh**: 2026-05-23 (0.5.2 cut — scope IDs + IPv4-embedded textual form; 0.5.x band closed).
+> **Last refresh**: 2026-06-03 (toolchain pin → 6.0.51; **AGNOS blocker re-assessed against the live cyrius + agnos *source*, not agnos's stale state.md** — the old "r8169 Attempt 97 pending" framing is dead: iron RX is proven, the kernel already has the ICMP logic in-tree, and Cyrius already has a working `CYRIUS_TARGET_AGNOS` emit target. The real, *narrow* gates are now: a `CYRIUS_TARGET_AGNOS` branch in `cyrius/lib/args.cyr`, and promoting the kernel's `icmp_ping` to a ring-3 syscall. See § AGNOS blocker for the code-grounded breakdown). 0.5.2 cut (scope IDs + IPv4-embedded textual form) was 2026-05-23; 0.5.x band closed.
 
 ---
 
@@ -11,9 +11,9 @@
 | Field | Value |
 |---|---|
 | Current version | **0.5.2** — scope IDs + IPv4-embedded textual form (final 0.5.x item) |
-| Status | **Linux MVP at full POSIX-ping output parity for v4 + v6** — `yo dns.google` (A default), `yo -6 dns.google` (AAAA), `yo ::1` (ip6.arpa PTR → `(localhost)`), `yo fe80::<self>%enp1s0` (link-local via scope id), `yo ::ffff:127.0.0.1` (v4-mapped routed through ICMPv4). AGNOS backend pending kernel surface. 0.5.x band closed. |
+| Status | **Linux MVP at full POSIX-ping output parity for v4 + v6** — `yo dns.google` (A default), `yo -6 dns.google` (AAAA), `yo ::1` (ip6.arpa PTR → `(localhost)`), `yo fe80::<self>%enp1s0` (link-local via scope id), `yo ::ffff:127.0.0.1` (v4-mapped routed through ICMPv4). AGNOS backend gated on two narrow items — a `CYRIUS_TARGET_AGNOS` branch in `cyrius/lib/args.cyr`, and exposing the kernel's existing `icmp_ping` as a ring-3 syscall (see § AGNOS blocker). The Cyrius agnos *target itself already works*. 0.5.x band closed. |
 | Build size | ~117 KB (adds IPv4-embedded parse + scope-id plumbing + ifindex resolver + v4-mapped output formatter, pre-DCE; 289 unreachable fns in main, ~315 in tests) |
-| Cyrius pin | 6.0.1 |
+| Cyrius pin | 6.0.51 |
 | Tests | 365 assertions in `tests/yo.tcyr` — adds IPv4-embedded parsing, scope-id parsing (`ipv6_parse_ex`), v4-mapped output formatter, `platform_resolve_ifindex` against `/sys/class/net/lo` |
 | Iron-validation host | archaemenid (Beelink SER, AMD) — same machine as the agnosticos iron-burn surface |
 | Family position | First entry in network-tools family |
@@ -84,10 +84,21 @@
 - `src/ipv4.cyr` — strict dotted-quad parser. Matches `agnos/kernel/core/net.cyr:21` `ip4()` packing.
 - `src/stats.cyr` + `src/output.cyr` — RTT accumulator + README-shaped output.
 
-**0.5.x band CLOSED with 0.5.2** — full POSIX-ping output parity for v4 + v6, literals + hostnames, both directions of DNS, with `-4`/`-6` family forcing, scope IDs for link-local, and v4-mapped textual form. Next milestone: **0.6.x AGNOS backend** — needs a sovereign equivalent of `platform_icmp_recv_ext` / `platform_icmp6_recv_ext` (cmsg-or-equivalent surface for TTL/hop-limit), sovereign UDP for the DNS path, and a sovereign ifindex resolver. Blocked on agnos kernel ICMP surface (r8169 RX-path 5-part bundle iron-validating, Attempt 97 pending). See [`roadmap.md`](roadmap.md) for the full path to 1.0.
+**0.5.x band CLOSED with 0.5.2** — full POSIX-ping output parity for v4 + v6, literals + hostnames, both directions of DNS, with `-4`/`-6` family forcing, scope IDs for link-local, and v4-mapped textual form. Next milestone: **0.6.x AGNOS backend** — needs a sovereign equivalent of `platform_icmp_recv_ext` / `platform_icmp6_recv_ext` (cmsg-or-equivalent surface for TTL/hop-limit), sovereign UDP for the DNS path, and a sovereign ifindex resolver. See [`roadmap.md`](roadmap.md) for the full path to 1.0.
+
+**AGNOS blocker — real status (re-assessed 2026-06-03 against live cyrius + agnos *source*; the prior write-ups parroted agnos's stale state.md and were wrong twice over).** What's actually true in the code:
+
+- **iron RX is NOT the blocker.** The old "blocked on r8169 RX-path 5-part bundle, Attempt 97 pending" framing is dead: the bundle landed, the RxConfig root cause was found (legacy `0xE700` profile vs the VER_46 `0xCF00` — `RX_EARLY_OFF` left clear, dropping large frames mid-DMA), **broadcast RX is proven on iron** (agnos 1.32.5 bite-7), and DHCP/router association reached the box on the 1.40.x burns.
+- **the kernel ICMP algorithm is NOT the blocker.** `icmp_ping(dst_ip) → rtt_ticks` + `net_handle_icmp` already exist in `agnos/kernel/core/net_icmp.cyr` — the focused echo→rtt shape yo's roadmap anticipated.
+- **the Cyrius agnos target is NOT missing.** `CYRIUS_TARGET_AGNOS=1` is a *working emit target* (`cyrius/src/main.cyr:1166`) — x86_64 ELF against the agnos syscall ABI, with real stdlib peers `lib/syscalls_x86_64_agnos.cyr` (sys_read/write/exit/open/close/mmap) + `lib/alloc_agnos.cyr`, selected via `#ifdef CYRIUS_TARGET_AGNOS` in `lib/syscalls.cyr:76`. `lib/io.cyr` already works on this target (routes through `sys_read`/`sys_write`; only `flock` is Linux-gated, and yo doesn't use it).
+
+The two **narrow, real** gates, both grounded in code:
+
+1. **`cyrius/lib/args.cyr` has no agnos branch.** It only has `#ifdef CYRIUS_TARGET_MACOS` + `#ifdef CYRIUS_TARGET_LINUX` (args.cyr:15,19); the Linux path recovers argv from `/proc/self/cmdline` (args.cyr:52). agnos has no `/proc`, so on an agnos build `argc()/argv()` have no impl → yo sees zero args. Fix: a `CYRIUS_TARGET_AGNOS` branch that reads argc/argv off the **stack at entry** per the agnos process ABI (header sketch at args.cyr:6-8). This is a **Cyrius stdlib fix** — it unblocks every sovereign userland binary, not just yo.
+2. **`icmp_ping` is not yet a ring-3 syscall.** It has only in-kernel callers (`agnos/kernel/core/selftests.cyr:112`, in-kernel `shell.cyr:989`); nothing in `agnos/kernel/core/syscall.cyr` exposes it. agnos must promote ICMP — plus UDP (DNS) and an ifindex lookup — into its sovereign ABI. The *logic* exists, so this is plumbing, not algorithm.
 
 Pending later:
-- **AGNOS backend** (`src/platform_agnos.cyr`) — pending the kernel ICMP surface in agnos (blocked on r8169 RX-path 5-part bundle iron-validating, Attempt 97 pending). Slots in as a sibling to `platform_linux.cyr` with no changes to `probe.cyr`. Will also need a sovereign UDP surface for the AGNOS-side `dns_resolve`.
+- **AGNOS backend** (`src/platform_agnos.cyr`) — gated on the two narrow items above (an `args.cyr` agnos branch + ICMP/UDP/ifindex ring-3 syscalls), NOT on iron, the kernel ICMP algorithm, or a missing Cyrius target. Slots in as a sibling to `platform_linux.cyr` with no changes to `probe.cyr`. Will also need the sovereign UDP surface for the AGNOS-side `dns_resolve`.
 - **`taar` substrate extraction** — waits for `dig` to grow into a real second consumer.
 
 ## Dependencies (current — `cyrius.cyml [deps].stdlib`)
@@ -109,7 +120,7 @@ string fmt alloc io vec str syscalls assert bench args flags
 
 ## Kernel coupling (AGNOS backend only)
 
-The AGNOS backend (future `src/platform_agnos.cyr`) will depend on a Cyrius-native ICMP primitive in `agnos/kernel/core/net.cyr`. The Linux backend has no AGNOS kernel coupling — it uses POSIX socket() against the host kernel directly.
+The AGNOS backend (future `src/platform_agnos.cyr`) will depend on a Cyrius-native ICMP primitive reachable from ring-3. The ICMP *logic* already exists in-kernel — `icmp_ping(dst_ip) → rtt_ticks` + `net_handle_icmp` in `agnos/kernel/core/net_icmp.cyr` (split from `net.cyr` in the 1.36.x refactor) — but it has only in-kernel callers (`selftests.cyr`, in-kernel `shell.cyr`); **agnos must still expose it (plus UDP + ifindex) as syscalls in its sovereign ABI** before a ring-3 `yo` can call it. The Linux backend has no AGNOS kernel coupling — it uses POSIX socket() against the host kernel directly.
 
 Now that the Linux backend exists, we have a concrete reference for what shape the AGNOS surface needs. The Linux call sites in `src/probe.cyr` and `src/dns.cyr` use:
 
@@ -127,16 +138,17 @@ Now that the Linux backend exists, we have a concrete reference for what shape t
 - `platform_set_recv_timeout_ms(fd, ms)`
 - `platform_now_us()` and `platform_sleep_ms(ms)`
 
-The AGNOS shape can match this 1:1, OR the kernel can offer the more focused `icmp_echo(addr, timeout_ms) → rtt_us` — at which point platform_agnos.cyr collapses `_send_to + _recv` into a single call internally. Per [[project_agnos_kernel_growth_rules]], the shape is decided when AGNOS opens the cycle; the Linux reference doesn't dictate it. The UDP surface will need an equivalent sovereign primitive for the AGNOS-side `dns_resolve` (likely `net_udp_send_recv` with a per-process port-binding table similar to `net.cyr:142-196`).
+The AGNOS shape can match this 1:1, OR the kernel can offer the more focused `icmp_echo(addr, timeout_ms) → rtt_us`. **The kernel has already de-facto chosen the focused form** — `icmp_ping(dst_ip)` returns elapsed timer_ticks and internally does the send + bounded `net_poll` wait — so when it's surfaced as a syscall `platform_agnos.cyr` will collapse `_send_to + _recv` into that one call. Per [[project_agnos_kernel_growth_rules]], the final ABI shape is decided when AGNOS opens the cycle; the Linux reference doesn't dictate it. The UDP surface will need an equivalent sovereign primitive for the AGNOS-side `dns_resolve` (likely `net_udp_send_recv` with a per-process port-binding table similar to `net.cyr:142-196`).
 
 ## Carry-forward (dependent on other repos)
 
 | Item | Blocked on | Owning repo |
 |---|---|---|
-| Kernel ICMP syscall | r8169 RX-path 5-part bundle iron-validating | agnos (Attempt 97 pending) |
+| `args.cyr` agnos branch | stack-walk argc/argv impl under `#ifdef CYRIUS_TARGET_AGNOS` (no `/proc` on agnos) | cyrius |
+| Ring-3 ICMP/UDP/ifindex syscalls | promoting existing `icmp_ping` + net primitives into the agnos sovereign ABI | agnos |
 | `taar` substrate extraction | Second consumer (`whirl` or `dig`) arriving | yo + sibling repos |
-| LAN-on-iron validation | Kernel ICMP + r8169 iron-clear | agnos + yo |
-| QEMU + localhost validation | Kernel ICMP loopback path | agnos + yo |
+| LAN-on-iron validation | the two gates above + `src/platform_agnos.cyr` (iron RX already proven) | agnos + yo |
+| QEMU + localhost validation | ring-3 ICMP syscall + `src/platform_agnos.cyr` | agnos + yo |
 
 ## Consumers
 
@@ -145,5 +157,8 @@ None yet. yo IS a leaf consumer of the kernel; nothing depends on yo today.
 ## Cross-references
 
 - [`roadmap.md`](roadmap.md) — milestone plan through v1.0
-- [agnosticos r8169-rx-path-audit.md](https://github.com/MacCracken/agnosticos/blob/main/docs/development/r8169-rx-path-audit.md) — the iron dependency
+- `cyrius/lib/args.cyr` + `cyrius/lib/syscalls_x86_64_agnos.cyr` — the agnos userland stdlib surface (gate #1 lives in args.cyr)
+- `agnos/kernel/core/net_icmp.cyr` (`icmp_ping`) + `agnos/kernel/core/syscall.cyr` — the kernel ICMP logic + where gate #2 (ring-3 syscall) lands
 - [agnosticos shared-crates.md § yo + taar](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/shared-crates.md) — substrate plan
+
+> **Doc hygiene note (2026-06-03):** the AGNOS-blocker status above was verified against live cyrius + agnos *source*, NOT agnos's own state.md (which lagged — it still described the userland target as missing). When refreshing this section, re-check the code, not sibling-repo prose.

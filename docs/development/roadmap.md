@@ -50,9 +50,13 @@ Everything in this band is achievable on the Linux backend alone — no new plat
 
 ### 0.6.x — AGNOS backend
 
-**Trigger**: agnos lands the kernel ICMP surface. Blocked on agnos r8169 RX-path 5-part bundle iron-validating (Attempt 97 pending; see [agnosticos iron-nuc-zen-log](https://github.com/MacCracken/agnosticos/blob/main/docs/development/iron-nuc-zen-log.md)).
+**Trigger**: two narrow gates, both verified against live source 2026-06-03 (see [`state.md` § AGNOS blocker](state.md) for the code-grounded breakdown). The old "blocked on r8169 Attempt 97" trigger is **dead** — iron RX is proven, the kernel ICMP logic already exists (`agnos/kernel/core/net_icmp.cyr` `icmp_ping`), and Cyrius already has a working `CYRIUS_TARGET_AGNOS` emit target. What's actually left:
 
-- [ ] Cyrius-native syscall surface in `agnos/kernel/core/net.cyr`. Per [[project_agnos_kernel_growth_rules]] — NOT POSIX `socket()`. Shape: either focused `icmp_echo(addr, timeout_ms) → rtt_us` or general `net_send_raw` + `net_recv_raw` pair. The Linux backend in `src/platform_linux.cyr` is the concrete reference for what shape yo needs; kernel can match it 1:1 or offer the focused form (in which case `platform_agnos.cyr` collapses the abstraction).
+1. **`cyrius/lib/args.cyr` agnos branch** — only MACOS + LINUX branches exist today; the Linux path reads `/proc/self/cmdline`, which agnos lacks. Needs a `#ifdef CYRIUS_TARGET_AGNOS` branch that stack-walks argc/argv at entry. Cyrius-side fix; unblocks all sovereign userland binaries. (`io.cyr` already works on the agnos target.)
+2. **Ring-3 ICMP/UDP/ifindex syscalls in agnos** — `icmp_ping` exists but has only in-kernel callers; agnos must expose it (+ UDP for DNS, + ifindex) in `agnos/kernel/core/syscall.cyr`. Logic exists; this is plumbing.
+
+- [ ] Promote `icmp_ping` (+ UDP send/recv + ifindex) from in-kernel functions to ring-3 syscalls in `agnos/kernel/core/syscall.cyr`. Per [[project_agnos_kernel_growth_rules]] — NOT POSIX `socket()`. The kernel already chose the focused `icmp_ping(dst_ip) → rtt_ticks` shape; `platform_agnos.cyr` collapses `_send_to + _recv` onto it.
+- [ ] `cyrius/lib/args.cyr` agnos branch (stack-walk argc/argv; no `/proc`).
 - [ ] Per-process ICMP listener registration in agnos kernel (analogous to UDP listener table at `net.cyr:142-196`).
 - [ ] QEMU smoke: `qemu-net-icmp-smoke.sh` boots kernel + sends a self-loopback ICMP echo, asserts rtt > 0.
 - [ ] `src/platform_agnos.cyr` in yo, dispatched by `#ifdef CYRIUS_TARGET_AGNOS` in `src/platform.cyr` (the `_LX_*` constants in `platform_linux.cyr` get a sibling `_AG_*` namespace).
@@ -126,6 +130,6 @@ Deliberate exclusions — keeps future contributors from adding to v1.0 by accid
 - **Extraction memory**: [[feedback-yo-extract-after-second-consumer]] — don't pre-build shared libs from naming alone.
 - **Substrate (planned)**: [taar](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/shared-crates.md) — extracts when dig has working code.
 - **Sibling tools**: [whirl (planned)](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/shared-crates.md), [dig (scaffold only)](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/shared-crates.md).
-- **Iron dependency** (AGNOS backend only): [agnos r8169 RX-path 5-part bundle](https://github.com/MacCracken/agnosticos/blob/main/docs/development/r8169-rx-path-audit.md) — AGNOS backend unblocks when Attempt 97 validates.
-- **Kernel-growth posture**: AGNOS `state.md` + memory [[project_agnos_kernel_growth_rules]].
+- **AGNOS backend gates** (verified against live source 2026-06-03, NOT sibling-repo state docs): `cyrius/lib/args.cyr` agnos branch + ring-3 ICMP/UDP/ifindex syscalls in `agnos/kernel/core/syscall.cyr`. Iron RX is already proven; the old r8169-Attempt-97 dependency is retired.
+- **Kernel-growth posture**: agnos kernel *source* (`net_icmp.cyr`, `syscall.cyr`) + memory [[project_agnos_kernel_growth_rules]]. Do NOT trust agnos's state.md for yo's blocker status — it lagged reality (claimed the userland target was missing when it ships in cyrius today).
 - **Naming lane**: English-wordplay / trickster lane per [[feedback_naming_lanes]] memory. Family: cmdrs, bnrmr, iam, hapi, kii, yo, whirl, dig.
