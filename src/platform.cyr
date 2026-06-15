@@ -5,9 +5,14 @@
 # platform_sleep_ms, platform_close, platform_set_recv_timeout_ms)
 # is defined in src/platform_linux.cyr.
 #
-# Later: this file gains #ifdef CYRIUS_TARGET_AGNOS, _WINDOWS, _MACOS
-# branches per the cyrius/lib args.cyr pattern. The AGNOS branch
-# replaces the POSIX socket() path with the sovereign icmp_echo /
-# net_send_raw kernel primitives; the rest stay POSIX-ish.
+# AGNOS branch landed 2026-06-14: src/platform_agnos.cyr replaces the POSIX
+# socket() path with the sovereign icmp_echo(#55) + udp_bind/send/recv/unbind
+# (#51-54) + getrandom(#45) + FS syscalls via the CYRIUS_TARGET_AGNOS peer
+# (cyrius >= 6.2.3). Windows / macOS branches still TODO.
 
+#ifdef CYRIUS_TARGET_AGNOS
+include "src/platform_agnos.cyr"
+#endif
+#ifndef CYRIUS_TARGET_AGNOS
 include "src/platform_linux.cyr"
+#endif

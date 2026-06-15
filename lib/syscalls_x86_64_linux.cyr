@@ -39,6 +39,7 @@ enum SysNr {
     SYS_WAIT4 = 61;
     SYS_KILL = 62;
     SYS_UNAME = 63;
+    SYS_SYSINFO = 99;
     SYS_FCNTL = 72;
     SYS_GETCWD = 79;
     SYS_CHDIR = 80;
@@ -90,12 +91,26 @@ enum SysNr {
     # v5.11.18 (kybernet 1.1.5-surfaced — sd_notify dgram + supervisor IPC).
     # See aarch64 peer + CHANGELOG [5.11.18].
     SYS_SOCKET = 41;
+    SYS_SOCKETPAIR = 53;
+    SYS_SETSOCKOPT = 54;
     SYS_CONNECT = 42;
     SYS_RECVFROM = 45;
     SYS_RECVMSG = 47;
     SYS_BIND = 49;
     SYS_LISTEN = 50;
     SYS_ACCEPT4 = 288;
+    # v6.1.3 — bare-name fs syscalls + POSIX *at() family (kriya M2 surfaced).
+    SYS_LSTAT = 6;
+    SYS_RENAME = 82;
+    SYS_LINK = 86;
+    SYS_OPENAT = 257;
+    SYS_MKDIRAT = 258;
+    SYS_NEWFSTATAT = 262;
+    SYS_UNLINKAT = 263;
+    SYS_RENAMEAT = 264;
+    SYS_LINKAT = 265;
+    SYS_FCHMODAT = 268;
+    SYS_UTIMENSAT = 280;
 }
 
 # ================================================================
@@ -342,6 +357,21 @@ fn sys_unlink(path): i64 {
 # Returns 0 on success, negative errno on failure.
 fn sys_symlink(target, linkpath): i64 {
     return syscall(SYS_SYMLINK, target, linkpath);
+}
+
+# v6.1.3 — bare-name fs peers (x86_64 has the direct syscalls; the
+# aarch64 peer routes these through the at-family). Hard-link, stat
+# that does NOT follow symlinks, and rename.
+fn sys_link(oldpath, newpath): i64 {
+    return syscall(SYS_LINK, oldpath, newpath);
+}
+# lstat(path, buf) — stat that does NOT follow a trailing symlink.
+fn sys_lstat(path, buf): i64 {
+    return syscall(SYS_LSTAT, path, buf);
+}
+# rename(oldpath, newpath) — single-filesystem rename/move.
+fn sys_rename(oldpath, newpath): i64 {
+    return syscall(SYS_RENAME, oldpath, newpath);
 }
 
 # Read the target of a symbolic link into `buf` (cap `bufsize`).

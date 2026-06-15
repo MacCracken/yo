@@ -1,0 +1,148 @@
+# platform_agnos.cyr — AGNOS backend (sovereign ICMP / UDP / clock).
+#
+# The agnos breakout (2026-06-14): replaces platform_linux.cyr's POSIX socket()
+# path with the AGNOS kernel's sovereign ring-3 syscalls via the
+# CYRIUS_TARGET_AGNOS peer (cyrius >= 6.2.3). Same per-backend raw-syscall
+# posture as platform_linux.cyr — no POSIX, no lib/net.cyr tagged unions.
+#
+# THE ICMP MODEL BRIDGE. AGNOS exposes icmp_echo(dst_ip)#55 — a ONE-SHOT primitive
+# that sends an echo request, waits for the reply, and returns the RTT in ms (or
+# -1 on timeout/no-NIC) in a single blocking call. yo's surface is POSIX-shaped
+# (open -> send_to -> recv_ext). We collapse it: send_to stores the request packet
+# + target; recv_ext calls icmp_echo, then ECHOES THE STORED REQUEST BACK as the
+# reply (flip type 8->0, recompute the RFC-1071 checksum via yo's icmp_checksum) so
+# yo's parser sees a valid echo-reply matching its own id/seq/payload. yo's RTT is
+# measured host-side via platform_now_us across send_to..recv_ext, which brackets
+# the blocking icmp_echo, so it lands within the kernel's 10ms tick of the true RTT.
+#
+# THE UDP PATH (yo resolves hostnames via DNS): listener-id based + non-blocking,
+# identical shape to dig's agnos backend.
+#
+# NOTE (cyrius-side): chrono's agnos clock_now_ms/sleep_ms are stale stubs (return
+# 0 / no-op) — they don't use uptime_ms#40 / sleep_ms#41 (live since agnos 1.43.x).
+# This backend calls those syscalls directly until chrono's agnos branch binds them.
+
+var _AG_SYS_UPTIME_MS = 40;
+var _AG_SYS_SLEEP_MS  = 41;
+var _AG_O_RDONLY      = 0;
+var _AG_ICMP_FD       = 900;       # sentinel fd for the (socketless) ICMP path
+
+# probe.cyr's icmp-open-failure error path does a raw syscall(_LX_SYS_WRITE, ...)
+# — provide the constant here so the agnos build resolves it. AGNOS write is also
+# syscall #1 (SYS_WRITE=1, matches Linux), and the branch is dead on agnos anyway
+# (platform_icmp_open never fails here). [cleanup: route this through the stdlib.]
+var _LX_SYS_WRITE = 1;
+
+var _ag_req[256];                  # stored ICMP request (module global = 2048 B)
+var _ag_req_len  = 0;
+var _ag_req_addr = 0;
+var _ag_src_port = 0;              # bound UDP source port (single query at a time)
+var _ag_timeout_ms = 5000;
+
+# --- ICMP (one-shot icmp_echo bridge) ---
+
+fn platform_icmp_open(): i64 { return _AG_ICMP_FD; }   # no real socket
+
+# Store the request; the actual send happens inside recv_ext's icmp_echo.
+fn platform_icmp_send_to(fd, packed_addr, pkt, pkt_len): i64 {
+    _ag_req_addr = packed_addr;
+    _ag_req_len  = pkt_len;
+    var i = 0;
+    while (i < pkt_len) { store8(&_ag_req + i, load8(pkt + i)); i = i + 1; }
+    return pkt_len;
+}
+
+# Do the ping (icmp_echo), then synthesize the echo-reply by handing the stored
+# request back with type 8->0 + a recomputed checksum. ttl_out (if non-zero) gets
+# a nominal 64 — icmp_echo doesn't surface the reply TTL. Returns reply length, or
+# -11 (-EAGAIN, mirrors SO_RCVTIMEO) on timeout.
+fn _ag_icmp_pong(buf, maxlen, ttl_out): i64 {
+    var rtt = sys_icmp_echo(_ag_req_addr);
+    if (rtt < 0) { return 0 - 11; }
+    var n = _ag_req_len;
+    if (n > maxlen) { n = maxlen; }
+    var i = 0;
+    while (i < n) { store8(buf + i, load8(&_ag_req + i)); i = i + 1; }
+    store8(buf, ICMP_ECHO_REPLY);              # type 8 -> 0
+    store8(buf + 2, 0); store8(buf + 3, 0);    # zero cksum before recompute
+    var ck = icmp_checksum(buf, n);            # yo's RFC 1071 checksum
+    store8(buf + 2, (ck >> 8) & 0xFF);
+    store8(buf + 3, ck & 0xFF);
+    if (ttl_out != 0) { store64(ttl_out, 64); }
+    return n;
+}
+
+fn platform_icmp_recv(fd, buf, maxlen): i64 { return _ag_icmp_pong(buf, maxlen, 0); }
+fn platform_icmp_recv_ext(fd, buf, maxlen, ttl_out): i64 { return _ag_icmp_pong(buf, maxlen, ttl_out); }
+
+# --- UDP (DNS resolution) ---
+
+fn platform_udp_open(): i64 {
+    var rb[2];
+    sys_getrandom(&rb, 2, 0);
+    var port = 49152 + (((load8(&rb) << 8) | load8(&rb + 1)) & 0x3FFF);
+    var lid = sys_udp_bind(port);
+    if (lid < 0) { return lid; }
+    _ag_src_port = port;
+    return lid;
+}
+
+fn platform_udp_send_to(fd, packed_addr, port, pkt, pkt_len): i64 {
+    var packed_ports = (_ag_src_port << 16) | (port & 0xFFFF);
+    return sys_udp_send(packed_addr, packed_ports, pkt, pkt_len);
+}
+
+fn platform_udp_recv(fd, buf, maxlen): i64 {
+    var deadline = syscall(_AG_SYS_UPTIME_MS) + _ag_timeout_ms;
+    while (syscall(_AG_SYS_UPTIME_MS) < deadline) {
+        var n = sys_udp_recv(fd, buf, maxlen, 0);
+        if (n > 0) { return n; }
+        if (n < 0) { return n; }
+        syscall(_AG_SYS_SLEEP_MS, 5);
+    }
+    return 0 - 11;
+}
+
+# --- common ---
+
+fn platform_close(fd): i64 {
+    if (fd >= _AG_ICMP_FD) { return 0; }       # ICMP sentinel — nothing to close
+    return sys_udp_unbind(fd);                 # else a UDP listener
+}
+
+fn platform_set_recv_timeout_ms(fd, timeout_ms): i64 {
+    _ag_timeout_ms = timeout_ms;
+    return 0;
+}
+
+fn platform_read_file(path, buf, maxlen): i64 {
+    var nl = 0;
+    while (load8(path + nl) != 0) { nl = nl + 1; }
+    var fd = sys_open(path, nl, _AG_O_RDONLY);
+    if (fd < 0) { return fd; }
+    var n = sys_read(fd, buf, maxlen);
+    sys_close(fd);
+    return n;
+}
+
+fn platform_now_us(): i64 { return syscall(_AG_SYS_UPTIME_MS) * 1000; }
+
+fn platform_sleep_ms(ms): i64 {
+    if (ms <= 0) { return 0; }
+    return syscall(_AG_SYS_SLEEP_MS, ms);
+}
+
+# --- not supported on AGNOS (stubs) ---
+
+# No IPv6 ICMP syscall on AGNOS — report unavailable so yo skips the v6 path.
+fn platform_icmp6_open(): i64 { return 0 - 1; }
+fn platform_icmp6_send_to(fd, addr16, scope_id, pkt, pkt_len): i64 { return 0 - 1; }
+fn platform_icmp6_recv_ext(fd, buf, maxlen, hop_out): i64 { return 0 - 1; }
+
+# No interface-index / netlink concept exposed to ring 3 — 0 = unscoped/default.
+fn platform_resolve_ifindex(name): i64 { return 0; }
+
+# No ring-3 signal/interrupt infra yet — install reports unavailable, check never
+# fires (continuous-ping Ctrl-C interruption is a host nicety, not load-bearing).
+fn platform_install_interrupt_watch(): i64 { return 0 - 1; }
+fn platform_check_interrupted(fd): i64 { return 0; }

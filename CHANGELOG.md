@@ -4,6 +4,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.3] — 2026-06-14 (AGNOS breakout — yo builds for the sovereign kernel)
+
+### Added
+- **`src/platform_agnos.cyr` — the AGNOS backend.** Replaces the POSIX `socket()` path with the sovereign ring-3
+  syscalls via the `CYRIUS_TARGET_AGNOS` peer (cyrius ≥ 6.2.3). **The ICMP model bridge**: AGNOS exposes
+  `icmp_echo`(#55) as a *one-shot* primitive (send + wait + return RTT in one blocking call), so yo's POSIX-shaped
+  `icmp_open → send_to → recv_ext` surface is collapsed — `send_to` stores the request, `recv_ext` calls
+  `icmp_echo` and then **echoes the stored request back** as the reply (flip type 8→0, recompute the RFC-1071
+  checksum via yo's own `icmp_checksum`) so yo's parser sees a valid echo-reply matching its id/seq/payload; RTT is
+  measured host-side across `send_to..recv_ext`. DNS resolution rides the UDP peer (`udp_bind`/`send`/`recv`/
+  `unbind` #51-54). IPv6-ICMP / ifindex / interrupt-watch report unavailable (no AGNOS ring-3 surface yet).
+  `src/platform.cyr` dispatches `#ifdef CYRIUS_TARGET_AGNOS`. **yo now builds for AGNOS** (`cyrius build --agnos`).
+
+### Changed
+- **Toolchain pin 6.0.51 → 6.2.5** (the cyrius release carrying the AGNOS net peer).
+- **Dropped the stale committed `lib/`** (81-file vendored snapshot that shadowed the 6.2.5 snapshot — the
+  reference tools don't vendor `lib/`). yo now uses the version-pinned stdlib snapshot.
+
+### Notes
+- Worked around a cyrius-side gap: chrono's agnos `clock_now_ms`/`sleep_ms` are stale stubs — the backend calls
+  `uptime_ms`#40 / `sleep_ms`#41 directly until chrono's agnos branch binds them.
+- One pre-existing `_LX_SYS_WRITE` leak in `probe.cyr`'s error path is satisfied in the agnos backend (write is
+  also syscall #1 on AGNOS; the branch is dead there); flagged for a stdlib-routing cleanup.
+
 ### Changed
 - Toolchain pin bumped `cyrius = "6.0.1"` → `"6.0.51"` in `cyrius.cyml` (resolves the wrapper-vs-manifest drift; installed toolchain was already 6.0.51). Build + all 365 test assertions green on 6.0.51, no source changes required.
 

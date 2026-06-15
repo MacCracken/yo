@@ -15,15 +15,22 @@
 #
 # Semantics: `atomic_load` / `atomic_store` are atomicity-only
 # (no ordering) — aligned 8-byte loads/stores are atomic on both
-# x86_64 (TSO) and aarch64 (naturally aligned). For sequential
-# consistency across threads, bracket them with `atomic_fence()`
-# or use `atomic_cas` / `atomic_fetch_add` (which are full
-# barriers on both arches).
+# x86_64 (TSO) and aarch64 (naturally aligned). `atomic_cas` /
+# `atomic_fetch_add` carry ACQUIRE-RELEASE ordering (CVE-28, v6.1.38:
+# x86 lock-prefixed RMW is full/seq-cst; aarch64 uses ldaxr/stlxr =
+# acquire-release — sufficient for lock acquire/release and the
+# publish-after-init pattern). The aarch64 bodies previously used bare
+# ldxr/stxr with NO barrier (the "dmb ish" the docs claimed was never
+# emitted), so a peer thread could observe a CAS-published pointer
+# before the pointee's writes. For a FULL (seq-cst) barrier, bracket
+# with `atomic_fence()` explicitly (the lock paths + the default_alloc
+# vtable publish do).
 #
 # x86_64:   `lock cmpxchg` / `lock xadd` / `mfence`
-# aarch64:  `ldxr`/`stxr` LL-SC loops + `dmb ish`.
-#           Plain `cas` / `ldadd` are ARMv8.1-LSE and not available
-#           on Pi 4 A72 (ARMv8.0-A), so the LL-SC form is used.
+# aarch64:  `ldaxr`/`stlxr` LL-SC loops (acquire/release exclusive) +
+#           `dmb ish` for `atomic_fence`. Plain `cas` / `ldadd` are
+#           ARMv8.1-LSE and not available on Pi 4 A72 (ARMv8.0-A), so
+#           the LL-SC form is used.
 #
 # >>> include "lib/atomic.cyr"
 
@@ -47,10 +54,12 @@ fn atomic_cas(ptr, expected, new): i64 {
     var ret = 0;
     #ifdef CYRIUS_ARCH_X86
     asm {
-        # Frame: [rbp-8]=ptr, [rbp-16]=expected, [rbp-24]=new, [rbp-32]=ret
-        0x48; 0x8B; 0x7D; 0xF8;        # mov rdi, [rbp-8]   ; ptr
-        0x48; 0x8B; 0x45; 0xF0;        # mov rax, [rbp-16]  ; expected (cmpxchg implicit src)
-        0x48; 0x8B; 0x4D; 0xE8;        # mov rcx, [rbp-24]  ; new
+        # v6.0.67: param_load(reg, idx) replaces the hand-rolled [rbp-N] param
+        # loads — prologue-drift-proof (the sigil/atomic coupling bug class). Frame:
+        # [rbp-32]=ret. param_load resolves param slots at emit time.
+        param_load(rdi, 0);            # ptr
+        param_load(rax, 1);            # expected (cmpxchg implicit src)
+        param_load(rcx, 2);            # new
         0xF0; 0x48; 0x0F; 0xB1; 0x0F;  # lock cmpxchg [rdi], rcx
         0x0F; 0x94; 0xC0;              # sete al            ; ZF -> al (1 if swap, 0 if not)
         0x48; 0x0F; 0xB6; 0xC0;        # movzx rax, al
@@ -59,16 +68,20 @@ fn atomic_cas(ptr, expected, new): i64 {
     #endif
     #ifdef CYRIUS_ARCH_AARCH64
     asm {
-        # Frame: [x29-8]=ptr, [x29-16]=expected, [x29-24]=new, [x29-32]=ret
-        0xA0; 0x83; 0x5F; 0xF8;        # ldur x0, [x29, #-8]   ; ptr
-        0xA1; 0x03; 0x5F; 0xF8;        # ldur x1, [x29, #-16]  ; expected
-        0xA2; 0x83; 0x5E; 0xF8;        # ldur x2, [x29, #-24]  ; new
+        # v6.0.67: param_load replaces hand-rolled [x29,#-N] param loads. Frame:
+        # [x29-32]=ret. param_load resolves param slots at emit time.
+        param_load(x0, 0);             # ptr
+        param_load(x1, 1);             # expected
+        param_load(x2, 2);             # new
         0x03; 0x00; 0x80; 0xD2;        # movz x3, #0           ; result = 0 (fail default)
         # retry:
-        0x04; 0x7C; 0x5F; 0xC8;        # ldxr x4, [x0]         ; load-exclusive
+        # CVE-28 (v6.1.38): ldaxr (load-ACQUIRE exclusive) — byte[1] 0x7C→0xFC
+        # vs plain ldxr sets the acquire bit; same size, branch offsets unchanged.
+        0x04; 0xFC; 0x5F; 0xC8;        # ldaxr x4, [x0]        ; load-acquire-exclusive
         0x9F; 0x00; 0x01; 0xEB;        # cmp x4, x1            ; compare to expected
         0xA1; 0x00; 0x00; 0x54;        # b.ne fail (+5 instrs = +20 B)
-        0x02; 0x7C; 0x05; 0xC8;        # stxr w5, x2, [x0]     ; store-exclusive
+        # stlxr (store-RELEASE exclusive) — byte[1] 0x7C→0xFC sets the release bit.
+        0x02; 0xFC; 0x05; 0xC8;        # stlxr w5, x2, [x0]    ; store-release-exclusive
         0x85; 0xFF; 0xFF; 0x35;        # cbnz w5, retry (-4 instrs = -16 B; imm19=-4→0x7FFFC)
         0x23; 0x00; 0x80; 0xD2;        # movz x3, #1           ; success
         0x02; 0x00; 0x00; 0x14;        # b done (+2 instrs)
@@ -88,22 +101,24 @@ fn atomic_fetch_add(ptr, delta): i64 {
     var ret = 0;
     #ifdef CYRIUS_ARCH_X86
     asm {
-        # Frame: [rbp-8]=ptr, [rbp-16]=delta, [rbp-24]=ret
-        0x48; 0x8B; 0x7D; 0xF8;        # mov rdi, [rbp-8]   ; ptr
-        0x48; 0x8B; 0x45; 0xF0;        # mov rax, [rbp-16]  ; delta (also receives old)
+        # v6.0.67: param_load replaces hand-rolled [rbp-N] param loads. Frame: [rbp-24]=ret.
+        param_load(rdi, 0);            # ptr
+        param_load(rax, 1);            # delta (also receives old)
         0xF0; 0x48; 0x0F; 0xC1; 0x07;  # lock xadd [rdi], rax
         0x48; 0x89; 0x45; 0xE8;        # mov [rbp-24], rax  ; ret = old
     }
     #endif
     #ifdef CYRIUS_ARCH_AARCH64
     asm {
-        # Frame: [x29-8]=ptr, [x29-16]=delta, [x29-24]=ret
-        0xA0; 0x83; 0x5F; 0xF8;        # ldur x0, [x29, #-8]   ; ptr
-        0xA1; 0x03; 0x5F; 0xF8;        # ldur x1, [x29, #-16]  ; delta
+        # v6.0.67: param_load replaces hand-rolled [x29,#-N] param loads. Frame: [x29-24]=ret.
+        param_load(x0, 0);             # ptr
+        param_load(x1, 1);             # delta
         # retry:
-        0x03; 0x7C; 0x5F; 0xC8;        # ldxr x3, [x0]         ; old
+        # CVE-28 (v6.1.38): ldaxr/stlxr (acquire/release exclusive) — byte[1]
+        # 0x7C→0xFC vs plain ldxr/stxr; same size, retry offset unchanged.
+        0x03; 0xFC; 0x5F; 0xC8;        # ldaxr x3, [x0]        ; old (acquire)
         0x64; 0x00; 0x01; 0x8B;        # add x4, x3, x1        ; old + delta
-        0x04; 0x7C; 0x05; 0xC8;        # stxr w5, x4, [x0]
+        0x04; 0xFC; 0x05; 0xC8;        # stlxr w5, x4, [x0]    ; (release)
         0xA5; 0xFF; 0xFF; 0x35;        # cbnz w5, retry (-3 instrs)
         0xA3; 0x83; 0x1E; 0xF8;        # stur x3, [x29, #-24]  ; ret = old
     }

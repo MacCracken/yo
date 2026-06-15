@@ -138,3 +138,13 @@ fn sys_munmap(addr, length) {
 fn sys_brk(addr) {
     return syscall(SYS_BRK, addr);
 }
+
+# CVE-19 (v6.1.36): fail-CLOSED entropy on Windows. There is no
+# getrandom(2)/getentropy here; the real source is BCryptGenRandom /
+# ProcessPrng via the PE import shim — tracked as a follow-on
+# (issues/2026-06-11-windows-entropy-primitive.md). Until that lands, return -1
+# so random_bytes() and its ws/sandhi/sigil consumers fail loudly rather than
+# emit weak/uninitialized values. NEVER replace this with a weak fallback.
+fn sys_getrandom(buf, len, flags): i64 {
+    return 0 - 1;
+}

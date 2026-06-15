@@ -43,3 +43,36 @@ include "lib/syscalls_x86_64_linux.cyr"
 include "lib/syscalls_aarch64_linux.cyr"
 #endif
 #endif
+# macOS (Mach-O). x86_64 uses the BSD-numbered syscalls_macos.cyr.
+# arm64 uses the Linux aarch64 numbers for now (tools build but their
+# file I/O does not yet work on macOS — see below). Mirrors the
+# CYRIUS_TARGET_MACOS dispatch in lib/alloc.cyr.
+#
+# KNOWN-INCOMPLETE (v6.0.33): full macOS tool/wrapper support is a
+# separate backend task. The macho-arm ESYSXLAT (src/backend/aarch64/
+# emit.cyr) translates ONLY the 9-syscall whitelist (0,1,2,3,9,10,11,
+# 60,228) from x86_64-Linux numbers to BSD. To make the tools work:
+#   (a) the stdlib here must feed x86_64-Linux numbers (read=0/open=2/
+#       …), not aarch64 (read=63/openat=56) — but switching to
+#       syscalls_x86_64_linux.cyr collides (duplicate `enum`); and
+#   (b) ESYSXLAT's whitelist must grow to cover the syscalls the tools
+#       use (stat/lseek/fork/execve/dup2/pipe → BSD equivalents +
+#       reroutes for the non-trivial ones).
+# Tracked as the macОS tool-surface follow-up. `cycc` itself is
+# UNAFFECTED — it uses its own x86-numbered `enum Sys`
+# (src/main_aarch64_macho.cyr) and self-hosts byte-identical (v6.0.33).
+#ifdef CYRIUS_TARGET_MACOS
+#ifdef CYRIUS_ARCH_X86
+include "lib/syscalls_macos.cyr"
+#endif
+#ifdef CYRIUS_ARCH_AARCH64
+include "lib/syscalls_aarch64_linux.cyr"
+#endif
+#endif
+# AGNOS ring-3 userspace (x86_64). Agnos syscall numbers + AO_* open flags
+# + the a4=r10 4-arg convention. Selected when cycc predefines
+# CYRIUS_TARGET_AGNOS (a CYRIUS_TARGET_AGNOS=1 build). Standalone peer —
+# see its header + agnos/docs/development/agnos-userland-abi.md.
+#ifdef CYRIUS_TARGET_AGNOS
+include "lib/syscalls_x86_64_agnos.cyr"
+#endif
