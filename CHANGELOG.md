@@ -4,6 +4,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.4] — 2026-06-14 (pin → 6.2.6; drop the chrono workaround)
+
+### Changed
+- **Toolchain pin 6.2.5 → 6.2.6.** cyrius 6.2.6 bound chrono's agnos monotonic clock + sleep to the real kernel
+  syscalls and added `sys_uptime_ms`(#40) / `sys_sleep_ms`(#41) peer wrappers (the fix for the gap `dig`/`yo`
+  surfaced — cyrius issue `2026-06-14-chrono-agnos-monotonic-sleep-stale-stubs.md`).
+- **`src/platform_agnos.cyr` drops the direct `syscall(40)/(41)` workaround** → uses the `sys_uptime_ms`/
+  `sys_sleep_ms` wrappers (`platform_now_us`, `platform_sleep_ms`, and the UDP-recv poll-loop deadline).
+- Dropped the regenerated stale `lib/` again (a 6.2.5-era vendored snapshot shadowed the 6.2.6 stdlib); the build
+  uses the version-pinned snapshot.
+
 ## [0.5.3] — 2026-06-14 (AGNOS breakout — yo builds for the sovereign kernel)
 
 ### Added

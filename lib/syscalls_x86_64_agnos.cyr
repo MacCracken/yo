@@ -98,6 +98,19 @@ enum AgnosDirent {
 }
 
 # ================================================================
+# 1.43.x monotonic-timing band (#40/#41) — older than the net band,
+# predating the frozen-surface freeze note. uptime_ms is the DOOM frame
+# clock (DG_GetTicksMs) and sleep_ms its pacing primitive (DG_SleepMs).
+# 100 Hz timer → 10 ms tick resolution. Wired into chrono.cyr's agnos
+# monotonic branch (clock_now_ns) + sleep_ms. See issue
+# 2026-06-14-chrono-agnos-monotonic-sleep-stale-stubs.md.
+# ================================================================
+enum SysNrAgnosTimer {
+    SYS_UPTIME_MS = 40;    # uptime_ms() → monotonic ms since boot (rax); no args, no fault
+    SYS_SLEEP_MS = 41;     # sleep_ms(ms) → 0; halts ~ms until the 100 Hz tick (capped 1 h)
+}
+
+# ================================================================
 # 1.45.x net / entropy / wall-clock band — the TLS + net-tools
 # enabler (agnos 1.45.0–1.45.4). NOT part of the frozen 0-33 surface;
 # mirrors agnos/kernel/core/syscall.cyr's #45–#55 dispatch. The
@@ -326,6 +339,13 @@ fn is_err(ret): i64 {
 # whole seconds, no sub-second. Wired into chrono.cyr's clock_epoch_secs
 # + tls_native's cert-window check on AGNOS.
 fn sys_time_unix(): i64 { return syscall(SYS_TIME_UNIX); }
+
+# Monotonic milliseconds since boot (#40; 100 Hz → 10 ms resolution). No
+# args, no fault surface. Drives chrono.cyr's agnos clock_now_ns/_ms.
+fn sys_uptime_ms(): i64 { return syscall(SYS_UPTIME_MS); }
+# Block the caller ~ms ms (#41; halts until the 100 Hz tick, capped 1 h).
+# Returns 0. Drives chrono.cyr's agnos sleep_ms. Guard ms<=0 at call sites.
+fn sys_sleep_ms(ms): i64 { return syscall(SYS_SLEEP_MS, ms); }
 
 # Raw TCP. sock_connect(#47) does socket()+connect() in one and BLOCKS
 # ~8s; dst_ip is the kernel ip4() form (oct1<<24)|…|oct4 (net.cyr byte-

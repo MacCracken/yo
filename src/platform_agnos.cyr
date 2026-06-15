@@ -2,7 +2,7 @@
 #
 # The agnos breakout (2026-06-14): replaces platform_linux.cyr's POSIX socket()
 # path with the AGNOS kernel's sovereign ring-3 syscalls via the
-# CYRIUS_TARGET_AGNOS peer (cyrius >= 6.2.3). Same per-backend raw-syscall
+# CYRIUS_TARGET_AGNOS peer (cyrius >= 6.2.6). Same per-backend raw-syscall
 # posture as platform_linux.cyr — no POSIX, no lib/net.cyr tagged unions.
 #
 # THE ICMP MODEL BRIDGE. AGNOS exposes icmp_echo(dst_ip)#55 — a ONE-SHOT primitive
@@ -18,12 +18,11 @@
 # THE UDP PATH (yo resolves hostnames via DNS): listener-id based + non-blocking,
 # identical shape to dig's agnos backend.
 #
-# NOTE (cyrius-side): chrono's agnos clock_now_ms/sleep_ms are stale stubs (return
-# 0 / no-op) — they don't use uptime_ms#40 / sleep_ms#41 (live since agnos 1.43.x).
-# This backend calls those syscalls directly until chrono's agnos branch binds them.
+# Monotonic time + sleep use the cyrius >= 6.2.6 peer wrappers sys_uptime_ms() (#40)
+# / sys_sleep_ms() (#41). (0.5.3 called syscall(40)/(41) directly because chrono's
+# agnos clock/sleep were stale stubs; 6.2.6 bound chrono + added these wrappers —
+# see cyrius issue 2026-06-14-chrono-agnos-monotonic-sleep-stale-stubs.)
 
-var _AG_SYS_UPTIME_MS = 40;
-var _AG_SYS_SLEEP_MS  = 41;
 var _AG_O_RDONLY      = 0;
 var _AG_ICMP_FD       = 900;       # sentinel fd for the (socketless) ICMP path
 
@@ -93,12 +92,12 @@ fn platform_udp_send_to(fd, packed_addr, port, pkt, pkt_len): i64 {
 }
 
 fn platform_udp_recv(fd, buf, maxlen): i64 {
-    var deadline = syscall(_AG_SYS_UPTIME_MS) + _ag_timeout_ms;
-    while (syscall(_AG_SYS_UPTIME_MS) < deadline) {
+    var deadline = sys_uptime_ms() + _ag_timeout_ms;
+    while (sys_uptime_ms() < deadline) {
         var n = sys_udp_recv(fd, buf, maxlen, 0);
         if (n > 0) { return n; }
         if (n < 0) { return n; }
-        syscall(_AG_SYS_SLEEP_MS, 5);
+        sys_sleep_ms(5);
     }
     return 0 - 11;
 }
@@ -125,11 +124,11 @@ fn platform_read_file(path, buf, maxlen): i64 {
     return n;
 }
 
-fn platform_now_us(): i64 { return syscall(_AG_SYS_UPTIME_MS) * 1000; }
+fn platform_now_us(): i64 { return sys_uptime_ms() * 1000; }
 
 fn platform_sleep_ms(ms): i64 {
     if (ms <= 0) { return 0; }
-    return syscall(_AG_SYS_SLEEP_MS, ms);
+    return sys_sleep_ms(ms);
 }
 
 # --- not supported on AGNOS (stubs) ---
