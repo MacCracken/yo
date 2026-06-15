@@ -4,7 +4,7 @@ version = "0.5.2"
 description = "yo — Yodel-Out, ICMP echo probe (Cyrius-native sovereign ping)"
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.0.51"
+cyrius = "6.2.5"
 
 [build]
 entry = "src/main.cyr"
