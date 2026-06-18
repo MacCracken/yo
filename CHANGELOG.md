@@ -4,6 +4,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.5] — 2026-06-15 (fold onto taar — IPv4 codec extracted)
+
+### Changed
+- **`src/ipv4.cyr` removed; folds onto `taar` 0.1.0.** yo and `dig` shipped a
+  byte-identical IPv4 parser — the documented extraction trigger. The codec
+  now lives in `taar/src/ipv4.cyr` (and gains `ipv4_format_to_buf`, which yo
+  didn't carry before); yo pulls it via `[deps.taar]` (`path = "../taar"` for
+  local dev, `git`+`tag` published fallback) and `include "lib/taar.cyr"` in
+  `src/main.cyr`. No behavior change — `ipv4` is pure code (no syscalls), so
+  the AGNOS backend (`platform_agnos.cyr`) is unaffected.
+
+### Notes
+- Host + `--agnos` both build clean; **365/365 tests** green. Pure-code
+  refactor — no QEMU re-smoke needed; the 0.5.4 ICMP-on-agnos result stands.
+
 ## [0.5.4] — 2026-06-14 (pin → 6.2.6; drop the chrono workaround)
 
 ### Changed
