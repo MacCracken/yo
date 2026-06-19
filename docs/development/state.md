@@ -2,7 +2,7 @@
 
 > **⚠ NOT A LOG.** Live state with pointers — current truth only. Per-release history → [`../../CHANGELOG.md`](../../CHANGELOG.md). Milestone path → [`roadmap.md`](roadmap.md).
 >
-> **Last refresh**: 2026-06-03 (toolchain pin → 6.0.51; **AGNOS blocker re-assessed against the live cyrius + agnos *source*, not agnos's stale state.md** — the old "r8169 Attempt 97 pending" framing is dead: iron RX is proven, the kernel already has the ICMP logic in-tree, and Cyrius already has a working `CYRIUS_TARGET_AGNOS` emit target. The real, *narrow* gates are now: a `CYRIUS_TARGET_AGNOS` branch in `cyrius/lib/args.cyr`, and promoting the kernel's `icmp_ping` to a ring-3 syscall. See § AGNOS blocker for the code-grounded breakdown). 0.5.2 cut (scope IDs + IPv4-embedded textual form) was 2026-05-23; 0.5.x band closed.
+> **Last refresh**: 2026-06-19 (0.5.6 — toolchain pin → 6.2.24, taar dep → 0.3.0; host + `--agnos` build clean, 365/365 tests green). Prior refresh 2026-06-03 (toolchain pin → 6.0.51; **AGNOS blocker re-assessed against the live cyrius + agnos *source*, not agnos's stale state.md** — the old "r8169 Attempt 97 pending" framing is dead: iron RX is proven, the kernel already has the ICMP logic in-tree, and Cyrius already has a working `CYRIUS_TARGET_AGNOS` emit target. The real, *narrow* gates are now: a `CYRIUS_TARGET_AGNOS` branch in `cyrius/lib/args.cyr`, and promoting the kernel's `icmp_ping` to a ring-3 syscall. See § AGNOS blocker for the code-grounded breakdown). 0.5.2 cut (scope IDs + IPv4-embedded textual form) was 2026-05-23; 0.5.x band closed.
 
 ---
 
@@ -10,10 +10,10 @@
 
 | Field | Value |
 |---|---|
-| Current version | **0.5.2** — scope IDs + IPv4-embedded textual form (final 0.5.x item) |
+| Current version | **0.5.6** — toolchain 6.2.24 + taar 0.3.0 dep bump (0.5.5: IPv4 codec folded onto taar) |
 | Status | **Linux MVP at full POSIX-ping output parity for v4 + v6** — `yo dns.google` (A default), `yo -6 dns.google` (AAAA), `yo ::1` (ip6.arpa PTR → `(localhost)`), `yo fe80::<self>%enp1s0` (link-local via scope id), `yo ::ffff:127.0.0.1` (v4-mapped routed through ICMPv4). AGNOS backend gated on two narrow items — a `CYRIUS_TARGET_AGNOS` branch in `cyrius/lib/args.cyr`, and exposing the kernel's existing `icmp_ping` as a ring-3 syscall (see § AGNOS blocker). The Cyrius agnos *target itself already works*. 0.5.x band closed. |
 | Build size | ~117 KB (adds IPv4-embedded parse + scope-id plumbing + ifindex resolver + v4-mapped output formatter, pre-DCE; 289 unreachable fns in main, ~315 in tests) |
-| Cyrius pin | 6.0.51 |
+| Cyrius pin | 6.2.24 |
 | Tests | 365 assertions in `tests/yo.tcyr` — adds IPv4-embedded parsing, scope-id parsing (`ipv6_parse_ex`), v4-mapped output formatter, `platform_resolve_ifindex` against `/sys/class/net/lo` |
 | Iron-validation host | archaemenid (Beelink SER, AMD) — same machine as the agnosticos iron-burn surface |
 | Family position | First entry in network-tools family |

@@ -1,10 +1,10 @@
 [package]
 name = "yo"
-version = "0.5.5"
+version = "0.5.6"
 description = "yo — Yodel-Out, ICMP echo probe (Cyrius-native sovereign ping)"
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.2.6"
+cyrius = "6.2.24"
 
 [build]
 entry = "src/main.cyr"
@@ -15,11 +15,13 @@ output = "yo"
 stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert", "bench", "args", "flags"]
 
 # Network-probe substrate — the IPv4 codec yo shared byte-identically
-# with dig, extracted at the yo-0.5.5 / dig-0.3.3 fold. `path` drives
-# local dev resolution; `git`+`tag` is the published fallback.
+# with dig, extracted at the yo-0.5.5 / dig-0.3.3 fold. taar 0.3.0 adds
+# socket + dns modules (whirl extraction) and the AGNOS socket backend;
+# yo still consumes only the pure IPv4 codec. `path` drives local dev
+# resolution; `git`+`tag` is the published fallback.
 [deps.taar]
 git = "https://github.com/MacCracken/taar.git"
 path = "../taar"
-tag = "0.1.0"
+tag = "0.3.0"
 modules = ["dist/taar.cyr"]
 ---

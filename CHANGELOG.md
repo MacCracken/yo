@@ -4,6 +4,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.6] — 2026-06-19 (toolchain 6.2.24; taar 0.3.0)
+
+### Changed
+- **Toolchain pin 6.2.6 → 6.2.24.** Build + tests green on the current wrapper;
+  resolves the manifest-pin/wrapper drift (`cyrius --version` no longer warns).
+- **`taar` dep 0.1.0 → 0.3.0.** taar grew its socket + DNS substrate (whirl
+  extraction) and an AGNOS socket backend; yo still consumes only the pure
+  IPv4 codec, so the bump is the regenerated `dist/taar.cyr` bundle (now 656
+  lines, vendored to `lib/taar.cyr` via `cyrius deps`) with no API change to the
+  `ipv4_*` surface yo uses. The new `socket`/`dns` modules ride along in the
+  bundle and DCE out of yo's binary.
+
+### Notes
+- Host + `--agnos` both build clean; **365/365 tests** green. Pure dep/toolchain
+  bump — no behavior change, no QEMU re-smoke needed.
+
 ## [0.5.5] — 2026-06-15 (fold onto taar — IPv4 codec extracted)
 
 ### Changed
