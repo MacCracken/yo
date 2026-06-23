@@ -4,6 +4,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.7] — 2026-06-23
+
+### Changed
+- **AGNOS nameserver selection prefers the kernel-leased DNS server.** On agnos,
+  `_dns_choose_nameserver` (`src/dns.cyr`) now calls the new **`net_config(3)`#61**
+  syscall first via `platform_dns_server` (`src/platform_agnos.cyr`) — the DHCP
+  option-6 on-subnet resolver — and uses it when `> 0`, before `/etc/resolv.conf` and
+  the `1.1.1.1` fallback. The off-subnet fallback needs working gateway routing the
+  kernel can't guarantee on real iron (it froze `yo google.com` on archaemenid).
+  Linux's `platform_dns_server` returns `0`, so the `/etc/resolv.conf` path is
+  unchanged there. Interim raw `syscall(61, 3)`. **Requires agnos ≥ 1.45.16.**
+- **`taar` dep 0.3.0 → 0.3.1** — the regenerated `dist/taar.cyr` bundle (carries taar's
+  matching kernel-leased-resolver path); yo still consumes only the `ipv4_*` codec, so
+  no API change to yo's surface (the new `socket`/`dns` modules DCE out of yo's binary).
+
 ## [0.5.6] — 2026-06-19 (toolchain 6.2.24; taar 0.3.0)
 
 ### Changed

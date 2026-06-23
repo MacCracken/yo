@@ -297,10 +297,16 @@ fn _dns_resolv_conf_nameserver(buf, len): i64 {
     return DNS_FAIL;
 }
 
-# Pick a nameserver: first try /etc/resolv.conf; fall back to
-# DNS_FALLBACK_NS (1.1.1.1) so `yo google.com` works on misconfigured
-# hosts. Returns packed IPv4.
+# Pick a nameserver: prefer the kernel-leased resolver (AGNOS net_config#61),
+# then /etc/resolv.conf, then DNS_FALLBACK_NS (1.1.1.1) so `yo google.com` works
+# on misconfigured hosts. On agnos the kernel learns the on-subnet DNS server from
+# the DHCP lease; preferring it avoids the off-subnet 1.1.1.1 fallback, which needs
+# working gateway routing the kernel can't guarantee on real iron (the QEMU-passed
+# / iron-failed gap). platform_dns_server() returns 0 on Linux, so the resolv.conf
+# path is unchanged there. Returns packed IPv4.
 fn _dns_choose_nameserver(): i64 {
+    var ksrv = platform_dns_server();
+    if (ksrv > 0) { return ksrv; }
     var rc = alloc(4096);
     var n = platform_read_file(DNS_RESOLV_CONF, rc, 4096);
     if (n > 0) {

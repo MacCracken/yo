@@ -334,6 +334,10 @@ fn platform_read_file(path, buf, maxlen): i64 {
     return n;
 }
 
+# Linux has no kernel-provided resolver to query — DNS discovery uses
+# /etc/resolv.conf. Return 0 so _dns_choose_nameserver falls through to the file.
+fn platform_dns_server(): i64 { return 0; }
+
 # Resolve an interface name (e.g., "lo", "eth0") to its kernel ifindex
 # by reading /sys/class/net/<name>/ifindex (decimal ASCII, trailing
 # newline). Returns the ifindex (≥1) on success, 0 on any failure.
