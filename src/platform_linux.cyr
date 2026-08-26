@@ -69,11 +69,32 @@ fn _lx_enable_recvttl(fd): i64 {
 # value is the kernel's negated errno from the last attempt). On
 # success, enables IP_RECVTTL so platform_icmp_recv_ext can return
 # the response TTL alongside the payload.
+# --- diag state (--diag) ---------------------------------------------
+# Which socket flavour actually opened, and the last negative return from
+# the send / recv syscalls. On Linux a failed probe is almost always one
+# of: no permission to open the socket at all, or a specific errno off
+# sendto (-101 ENETUNREACH, -1 EPERM). Recording them costs two stores on
+# paths that already branched, and turns "100% loss" into a cause.
+var _LX_ICMP_MODE_NONE   = 0;
+var _LX_ICMP_MODE_DGRAM  = 1;
+var _LX_ICMP_MODE_RAW    = 2;
+
+var _lx_icmp_mode     = 0;
+var _lx_last_send_err = 0;
+var _lx_last_recv_err = 0;
+
 fn platform_icmp_open(): i64 {
     var fd = syscall(_LX_SYS_SOCKET, _LX_AF_INET, _LX_SOCK_DGRAM, _LX_IPPROTO_ICMP);
-    if (fd >= 0) { _lx_enable_recvttl(fd); return fd; }
+    if (fd >= 0) {
+        _lx_enable_recvttl(fd);
+        _lx_icmp_mode = _LX_ICMP_MODE_DGRAM;
+        return fd;
+    }
     var fd2 = syscall(_LX_SYS_SOCKET, _LX_AF_INET, _LX_SOCK_RAW, _LX_IPPROTO_ICMP);
-    if (fd2 >= 0) { _lx_enable_recvttl(fd2); }
+    if (fd2 >= 0) {
+        _lx_enable_recvttl(fd2);
+        _lx_icmp_mode = _LX_ICMP_MODE_RAW;
+    }
     return fd2;
 }
 
@@ -115,7 +136,9 @@ fn _lx_sockaddr_in(packed_addr, port): i64 {
 # errno. Caller owns pkt and sa. ICMP socket ignores port — pass 0.
 fn platform_icmp_send_to(fd, packed_addr, pkt, pkt_len): i64 {
     var sa = _lx_sockaddr_in(packed_addr, 0);
-    return syscall(_LX_SYS_SENDTO, fd, pkt, pkt_len, 0, sa, 16);
+    var n = syscall(_LX_SYS_SENDTO, fd, pkt, pkt_len, 0, sa, 16);
+    if (n < 0) { _lx_last_send_err = n; }
+    return n;
 }
 
 # recvfrom(fd, buf, maxlen, 0, NULL, NULL). Returns bytes received or
@@ -175,7 +198,7 @@ fn platform_icmp_recv_ext(fd, buf, maxlen, ttl_out): i64 {
 
     var n = syscall(_LX_SYS_RECVMSG, fd, mh, 0);
     store64(ttl_out, 0);
-    if (n < 0) { return n; }
+    if (n < 0) { _lx_last_recv_err = n; return n; }
 
     var ctllen = load64(mh + 40);   # kernel writes back actual controllen
     store64(ttl_out, _lx_cmsg_find_ttl(ctl, ctllen));
@@ -273,7 +296,9 @@ fn platform_icmp6_open(): i64 {
 # sent or negative errno.
 fn platform_icmp6_send_to(fd, addr16, scope_id, pkt, pkt_len): i64 {
     var sa = _lx_sockaddr_in6(addr16, 0, scope_id);
-    return syscall(_LX_SYS_SENDTO, fd, pkt, pkt_len, 0, sa, 28);
+    var n = syscall(_LX_SYS_SENDTO, fd, pkt, pkt_len, 0, sa, 28);
+    if (n < 0) { _lx_last_send_err = n; }
+    return n;
 }
 
 # Walk a cmsg buffer for the IPv6 hop limit (level=IPPROTO_IPV6,
@@ -315,7 +340,7 @@ fn platform_icmp6_recv_ext(fd, buf, maxlen, hop_out): i64 {
 
     var n = syscall(_LX_SYS_RECVMSG, fd, mh, 0);
     store64(hop_out, 0);
-    if (n < 0) { return n; }
+    if (n < 0) { _lx_last_recv_err = n; return n; }
 
     var ctllen = load64(mh + 40);
     store64(hop_out, _lx_cmsg_find_hoplimit(ctl, ctllen));
@@ -425,5 +450,87 @@ fn platform_check_interrupted(fd): i64 {
     var buf = alloc(_LX_SIGINFO_SIZE);
     var n = syscall(_LX_SYS_READ, fd, buf, _LX_SIGINFO_SIZE);
     if (n > 0) { return 1; }
+    return 0;
+}
+
+# --- first-fail diagnostics (--diag) ----------------------------------
+#
+# Called by probe.cyr when a target ends at 100% loss (or its socket never
+# opened) and --diag was passed. Answers, in order, the questions that
+# actually explain a silent Linux probe:
+#
+#   1. Did we get an unprivileged ICMP socket, or fall back to raw?
+#   2. Does the kernel even allow unprivileged ICMP for our gid?
+#      (`ping_group_range` is "0 0" on stock Debian/Ubuntu — the single
+#      most common reason yo works as root and not otherwise.)
+#   3. Did the packets leave? A negative sendto errno is conclusive:
+#      -1 EPERM, -101 ENETUNREACH, -13 EACCES.
+#   4. If they left, did anything come back? -11 EAGAIN is SO_RCVTIMEO
+#      firing — i.e. a real timeout rather than a local failure.
+#
+# Errnos are printed raw (negative) because that is what the syscall
+# returned; decoding a table of them into strings is not worth the bytes
+# on a path that only runs when something is already wrong.
+fn platform_diag_dump(target, af): i64 {
+    output_diag_open(target, af);
+    output_diag_kv("backend         ", "linux (POSIX socket)");
+
+    if (_lx_icmp_mode == _LX_ICMP_MODE_DGRAM) {
+        output_diag_kv("icmp socket     ", "SOCK_DGRAM (unprivileged)");
+    }
+    if (_lx_icmp_mode == _LX_ICMP_MODE_RAW) {
+        output_diag_kv("icmp socket     ", "SOCK_RAW (privileged fallback)");
+    }
+    if (_lx_icmp_mode == _LX_ICMP_MODE_NONE) {
+        output_diag_kv("icmp socket     ", "never opened");
+    }
+
+    # /proc/sys/net/ipv4/ping_group_range — "<lo>\t<hi>". A gid outside
+    # [lo,hi] cannot open SOCK_DGRAM ICMP at all. Trim the trailing LF so
+    # it renders on one line; if the read fails, say so rather than
+    # printing a stale buffer.
+    var pg[64];
+    var pn = platform_read_file("/proc/sys/net/ipv4/ping_group_range", &pg, 63);
+    if (pn > 0) {
+        var t = pn;
+        while (t > 0) {
+            if (load8(&pg + t - 1) != 10) { break; }
+            t = t - 1;
+        }
+        store8(&pg + t, 0);
+        # The sysctl separates lo/hi with a TAB, which renders ragged next
+        # to the other values — flatten it to a space.
+        var k = 0;
+        while (k < t) {
+            if (load8(&pg + k) == 9) { store8(&pg + k, 32); }
+            k = k + 1;
+        }
+        output_diag_kv("ping_group_range", &pg);
+    }
+    if (pn <= 0) {
+        output_diag_kv("ping_group_range", "unreadable");
+    }
+
+    if (_lx_last_send_err < 0) {
+        output_diag_kv_int("last sendto     ", _lx_last_send_err);
+    }
+    if (_lx_last_send_err == 0) {
+        output_diag_kv("last sendto     ", "ok (packets left the host)");
+    }
+
+    # -11 is EAGAIN: SO_RCVTIMEO fired, so the send succeeded and nothing
+    # answered in time. That is a genuine network timeout and reads very
+    # differently from a local error, so it gets words rather than a number.
+    if (_lx_last_recv_err == 0) {
+        output_diag_kv("last recv       ", "no error recorded");
+    }
+    if (_lx_last_recv_err == 0 - 11) {
+        output_diag_kv("last recv       ", "-11 EAGAIN (timeout — sent, nothing came back within -W)");
+    }
+    if (_lx_last_recv_err < 0) {
+        if (_lx_last_recv_err != 0 - 11) {
+            output_diag_kv_int("last recv       ", _lx_last_recv_err);
+        }
+    }
     return 0;
 }

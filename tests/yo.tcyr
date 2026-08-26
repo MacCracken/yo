@@ -751,6 +751,39 @@ fn main() {
     cli_parse_argv(reg_nd, 2, av_nd);
     assert_eq(cli_numeric(reg_nd), 0, "numeric off by default");
 
+    # ----- CLI: --diag flag -----
+    test_group("cli --diag flag");
+
+    var reg_dg = cli_new();
+    var av_dg = _mk_argv("yo", "--diag", "host", 0, 0, 0, 0, 0);
+    assert_eq(cli_parse_argv(reg_dg, 3, av_dg), CLI_OK, "--diag parses");
+    assert_eq(cli_diag(reg_dg), 1, "--diag sets diag");
+
+    var reg_dd = cli_new();
+    var av_dd = _mk_argv("yo", "host", 0, 0, 0, 0, 0, 0);
+    cli_parse_argv(reg_dd, 2, av_dd);
+    assert_eq(cli_diag(reg_dd), 0, "diag off by default");
+
+    # --diag is long-only on purpose (roadmap reserves -D for the POSIX
+    # timestamp option). Pin that: a bare -D must NOT be accepted as a
+    # short form of --diag, or claiming -D later becomes a breaking change.
+    var reg_dD = cli_new();
+    var av_dD = _mk_argv("yo", "-D", "host", 0, 0, 0, 0, 0);
+    assert_eq(cli_parse_argv(reg_dD, 3, av_dD), CLI_ERR_PARSE, "-D is not a --diag short form");
+
+    # --diag composes with -q: a scripted health check wants the summary
+    # suppressed but the failure reason kept, so the two are independent.
+    var reg_dq = cli_new();
+    var av_dq = _mk_argv("yo", "-q", "--diag", "host", 0, 0, 0, 0);
+    assert_eq(cli_parse_argv(reg_dq, 4, av_dq), CLI_OK, "-q --diag parses together");
+    assert_eq(cli_quiet(reg_dq), 1, "-q --diag keeps quiet set");
+    assert_eq(cli_diag(reg_dq), 1, "-q --diag keeps diag set");
+
+    # Registry grew 88 -> 96 B for the new slot; pin it so a future flag
+    # that forgets to resize CLI_REG_SIZE corrupts the heap loudly here
+    # rather than silently in the field.
+    assert_eq(CLI_REG_SIZE, 96, "cli registry is 96 B (11 slots)");
+
     # ----- CLI: -4 / -6 flags -----
     test_group("cli -4 / -6 flags");
 

@@ -4,6 +4,69 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.11] — 2026-08-26 — `--diag` first-fail diagnostics + the AGNOS run gate
+
+Two roadmap items: the last unchecked **feature** in § 0.7.x, and the last open
+item in § 0.6.x. Together they close the gap between "the AGNOS backend compiles"
+and "the AGNOS backend demonstrably works, and says why when it doesn't".
+
+### Added
+- **`--diag` — first-fail diagnostics on a silent probe.** When a target ends at
+  100% loss (or its ICMP socket never opened), `--diag` dumps the per-backend
+  state that explains it. Long-only on purpose: § Future reserves `-D` for the
+  POSIX timestamp option, and a test pins that `-D` is still rejected so claiming
+  it later stays non-breaking. Not gated on `-q` — `-q --diag` is the shape a
+  scripted health check wants, and suppressing the reason with the chatter would
+  defeat the flag.
+
+  On **Linux** it answers, in order: did we get an unprivileged socket or fall
+  back to raw; does `ping_group_range` even permit our gid (it is `0 0` on stock
+  Debian/Ubuntu — the usual reason yo works as root and not otherwise); did the
+  packets leave (a negative `sendto` errno is conclusive); and if they left, did
+  anything come back (`-11 EAGAIN` is `SO_RCVTIMEO` firing, i.e. a real network
+  timeout rather than a local failure).
+
+  On **AGNOS** it prints the `net_config`#61 fields — ip / netmask / gateway /
+  dns. That is the whole first fork in an AGNOS network debug: an unset `net ip`
+  means DHCP never leased, so nothing could have been sent. There is no `ip addr`
+  and no second terminal on that box; the tool has to print its own network state
+  or the information does not exist.
+
+- **`scripts/agnos-qemu-smoke.sh` — yo actually RUNS on AGNOS, in CI-able form.**
+  Boots a production agnos kernel against an ext2 rootfs carrying `/bin/agnsh` +
+  `/bin/yo`, types a probe at the shell, and asserts on the serial log. Verified
+  in both directions on archaemenid:
+  - `10.0.2.2` (SLIRP gateway) → `2 sent · 2 received · 0% loss`, `ttl=64`,
+    **PASS** — `icmp_echo`#55 round-tripped through `_ag_icmp_pong`'s bridge and
+    yo's own parser accepted the synthesised reply.
+  - `10.0.2.99` (nothing there) → `100% loss`, the `--diag` block correctly
+    showing a healthy lease (`net ip 10.0.2.15`, gateway, dns) and
+    `icmp_echo #55: -1`, `run: exit 1`, **FAIL**. A gate that cannot fail is
+    worthless; this one was made to fail on purpose before being trusted.
+
+### Notes
+- Until now the AGNOS backend's only evidence was two **manual** iron burns in
+  agnos's CHANGELOG (1.45.16: `yo google.com` 2/4, RX-ring overflow; 1.51.7 on
+  2026-07-02: 4/4 at 0% loss). Manual burns are not a regression gate — nothing
+  caught a break between them. This is that gate.
+- **agnos has no serial RX path.** Console input comes from `kbd_read_blocking`
+  (`kernel/core/syscall.cyr`), a USB-keyboard read, so `-serial stdio` is
+  output-only and piping to QEMU's stdin reaches nothing. The smoke drives the
+  guest the way `agnosticos/scripts/qemu-fb-smoke.sh` does: `-device qemu-xhci`
+  + `-device usb-kbd,bus=xhci.0`, typing via QMP `send-key`. **No agnos-side
+  kernel change was needed** — an earlier draft of this work assumed a
+  compile-gated `YO_SELFTEST` hook would be required, and it is not.
+- Two bugs were caught in the smoke itself by running the failure case:
+  `grep '0% loss'` also matches "10**0% loss**" (it reported PASS on a total
+  failure), and waiting on `% loss` truncated the run before the `--diag` block
+  printed — the trap `agnos/scripts/smoke/lib/qemu-dwell.sh` warns about in its
+  header. It now anchors the match and waits for the shell prompt to return.
+- Host + `--agnos` build clean; **373/373 tests** (365 + 8 for `--diag`).
+- roadmap.md and state.md still describe § 0.6.x / § 0.7.x as open and the AGNOS
+  backend as never-run. They are wrong and are being reconciled in **0.6.0**,
+  together with the v1.0-criteria pass.
+
+
 ## [0.5.10] — 2026-08-26 (toolchain 6.5.35; taar 0.5.0)
 
 Readability/robustness only — **no behaviour change**, no probe path touched.

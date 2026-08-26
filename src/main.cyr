@@ -183,7 +183,8 @@ fn main() {
             cli_timeout_ms(reg),
             cli_interval_ms(reg),
             cli_size(reg),
-            cli_quiet(reg)
+            cli_quiet(reg),
+            cli_diag(reg)
         );
         if (rrc == 0) { any_reply = 1; }
         if (rrc == 2) { any_error = 1; }

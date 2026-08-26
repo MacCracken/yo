@@ -255,3 +255,55 @@ fn output_summary(s): i64 {
     }
     return 0;
 }
+
+# --- first-fail diagnostics (--diag) ----------------------------------
+#
+# Printed only when `--diag` was passed AND the target ended at 100% loss
+# (or its ICMP socket never opened) — the two first-fail cases roadmap.md
+# § 0.7.x names. Shape is deliberately flat `  key: value` lines under a
+# rule so it greps cleanly out of a serial log: on the AGNOS backend this
+# is read off a QEMU or iron console, not a terminal.
+#
+# The facts themselves are per-backend (`platform_diag_dump`) — these are
+# just the shared formatters, defined here because output.cyr is included
+# before platform.cyr in the single-pass build.
+
+fn output_diag_open(target, af): i64 {
+    _output_puts("  --- diag: no reply from ");
+    _output_puts(target);
+    if (af == 6) { _output_puts(" (IPv6)"); }
+    if (af != 6) { _output_puts(" (IPv4)"); }
+    _output_puts(" ---\n");
+    return 0;
+}
+
+# One `  <label>: <value>` line. Callers pad the label themselves so the
+# colons line up — there is no column logic here on purpose.
+fn output_diag_kv(label, value): i64 {
+    _output_puts("  ");
+    _output_puts(label);
+    _output_puts(": ");
+    _output_puts(value);
+    _output_puts("\n");
+    return 0;
+}
+
+fn output_diag_kv_int(label, n): i64 {
+    _output_puts("  ");
+    _output_puts(label);
+    _output_puts(": ");
+    fmt_int(n);
+    _output_puts("\n");
+    return 0;
+}
+
+# `  <label>: a.b.c.d`. Renders 0 as "unset" rather than "0.0.0.0" — on
+# AGNOS an unset net_config field means "DHCP never leased", which is a
+# different fact from a genuine all-zero address and is usually THE
+# answer when a probe gets nothing back.
+fn output_diag_kv_ipv4(label, packed): i64 {
+    if (packed == 0) { return output_diag_kv(label, "unset"); }
+    var b[24];
+    output_ipv4_to_buf(packed, &b);
+    return output_diag_kv(label, &b);
+}

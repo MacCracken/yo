@@ -15,6 +15,11 @@
 #   -n, --numeric           skip reverse DNS lookup (literal IP banner only)
 #   -4, --ipv4              force IPv4 (literal v4 or A lookup only)
 #   -6, --ipv6              force IPv6 (literal v6 or AAAA lookup only)
+#       --diag              on 100% loss, dump first-fail diagnostics
+#
+# `--diag` is long-only (short_ch 0). No short letter is claimed for it
+# deliberately: roadmap.md § Future reserves `-D` for the POSIX-ping
+# timestamp option, and burning it here would force a rename later.
 #
 # Positional: <host> — required unless --help.
 
@@ -32,8 +37,8 @@ enum CliResult {
     CLI_ERR_AF_CONFLICT     = 5;
 }
 
-# Registry layout (88 B): flags context + 10 flag indices.
-var CLI_REG_SIZE = 88;
+# Registry layout (96 B): flags context + 11 flag indices.
+var CLI_REG_SIZE = 96;
 
 fn _cli_reg_ctx(r):       i64 { return load64(r); }
 fn _cli_reg_help(r):      i64 { return load64(r + 8); }
@@ -46,6 +51,7 @@ fn _cli_reg_verbose(r):   i64 { return load64(r + 56); }
 fn _cli_reg_numeric(r):   i64 { return load64(r + 64); }
 fn _cli_reg_v4(r):        i64 { return load64(r + 72); }
 fn _cli_reg_v6(r):        i64 { return load64(r + 80); }
+fn _cli_reg_diag(r):      i64 { return load64(r + 88); }
 
 # Build a fresh registry: alloc context, flags_new, register every
 # flag, stash the indices. Caller hands the returned ptr to every
@@ -65,6 +71,7 @@ fn cli_new(): i64 {
     store64(r + 64, flags_add_bool(fs, 110, "numeric",  0,                       "skip reverse DNS lookup"));
     store64(r + 72, flags_add_bool(fs,  52, "ipv4",     0,                       "force IPv4 (literal v4 / A only)"));
     store64(r + 80, flags_add_bool(fs,  54, "ipv6",     0,                       "force IPv6 (literal v6 / AAAA only)"));
+    store64(r + 88, flags_add_bool(fs,   0, "diag",     0,                       "on 100% loss, dump first-fail diagnostics"));
     return r;
 }
 
@@ -101,6 +108,7 @@ fn cli_verbose(reg):     i64 { return flags_get_bool(_cli_reg_ctx(reg), _cli_reg
 fn cli_numeric(reg):     i64 { return flags_get_bool(_cli_reg_ctx(reg), _cli_reg_numeric(reg)); }
 fn cli_ipv4(reg):        i64 { return flags_get_bool(_cli_reg_ctx(reg), _cli_reg_v4(reg)); }
 fn cli_ipv6(reg):        i64 { return flags_get_bool(_cli_reg_ctx(reg), _cli_reg_v6(reg)); }
+fn cli_diag(reg):        i64 { return flags_get_bool(_cli_reg_ctx(reg), _cli_reg_diag(reg)); }
 
 # First positional argument = target host. Returns 0 if none.
 fn cli_target(reg): i64 {
@@ -119,7 +127,7 @@ fn cli_target_at(reg, idx): i64 {
 
 # Print "Usage: ..." line to the given fd (1 stdout, 2 stderr).
 fn cli_print_usage(fd): i64 {
-    var u = "Usage: yo [-c count] [-W timeout_ms] [-i interval_ms] [-s size] [-q|-v] [-n] [-4|-6] <host> [host ...]\n";
+    var u = "Usage: yo [-c count] [-W timeout_ms] [-i interval_ms] [-s size] [-q|-v] [-n] [-4|-6] [--diag] <host> [host ...]\n";
     syscall(1, fd, u, strlen(u));
     return 0;
 }

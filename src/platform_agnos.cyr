@@ -37,6 +37,7 @@ var _ag_req_len  = 0;
 var _ag_req_addr = 0;
 var _ag_src_port = 0;              # bound UDP source port (single query at a time)
 var _ag_timeout_ms = 5000;
+var _ag_last_echo_rc = 0;          # last sys_icmp_echo return, for --diag
 
 # --- ICMP (one-shot icmp_echo bridge) ---
 
@@ -57,6 +58,7 @@ fn platform_icmp_send_to(fd, packed_addr, pkt, pkt_len): i64 {
 # -11 (-EAGAIN, mirrors SO_RCVTIMEO) on timeout.
 fn _ag_icmp_pong(buf, maxlen, ttl_out): i64 {
     var rtt = sys_icmp_echo(_ag_req_addr);
+    _ag_last_echo_rc = rtt;
     if (rtt < 0) { return 0 - 11; }
     var n = _ag_req_len;
     if (n > maxlen) { n = maxlen; }
@@ -159,3 +161,50 @@ fn platform_resolve_ifindex(name): i64 { return 0; }
 # fires (continuous-ping Ctrl-C interruption is a host nicety, not load-bearing).
 fn platform_install_interrupt_watch(): i64 { return 0 - 1; }
 fn platform_check_interrupted(fd): i64 { return 0; }
+
+# --- first-fail diagnostics (--diag) ----------------------------------
+#
+# The AGNOS counterpart of platform_linux.cyr's dump, and the reason the
+# flag exists at all: on agnos there is no `ip addr`, no `dmesg`, no
+# second terminal. When a probe returns nothing on iron you have the
+# serial console and whatever the tool prints, so the tool has to print
+# the network state itself.
+#
+# net_config#61 is the whole story. All four fields are populated by the
+# DHCP ACK (net_dhcp.cyr), so an unset `net ip` means no lease was ever
+# taken — the NIC never came up, or the DISCOVER/OFFER never completed.
+# That single line separates "yo is broken" from "the box has no network",
+# which is the first fork in every AGNOS net debug.
+#
+# NOTE: roadmap.md § 0.7.x asked for kernel ICMP send/recv COUNTERS here.
+# Those do not exist: the agnos kernel keeps no ICMP tx/rx counters and
+# exposes none to ring 3 (net_config has exactly four fields, 0..3, and
+# returns -1 for anything else). Adding them is an agnos-side change, so
+# this dumps the configuration state that IS reachable plus the raw
+# icmp_echo return, and the counters stay a kernel ask.
+fn platform_diag_dump(target, af): i64 {
+    output_diag_open(target, af);
+    output_diag_kv("backend         ", "agnos (sovereign syscalls)");
+
+    if (af == 6) {
+        output_diag_kv("note            ", "no ICMPv6 syscall on agnos — the v6 path is unavailable, not merely silent");
+    }
+
+    output_diag_kv_ipv4("net ip          ", sys_net_ip());
+    output_diag_kv_ipv4("netmask         ", sys_net_netmask());
+    output_diag_kv_ipv4("gateway         ", sys_net_gateway());
+    output_diag_kv_ipv4("dns server      ", sys_net_dns_server());
+
+    if (sys_net_ip() == 0) {
+        output_diag_kv("diagnosis       ", "no DHCP lease — the NIC never configured; nothing could have been sent");
+    }
+
+    # icmp_echo(#55) returns RTT in ms (>= 0) or -1 on timeout / NIC down.
+    if (_ag_last_echo_rc < 0) {
+        output_diag_kv("icmp_echo #55   ", "-1 (timed out at the kernel's fixed ~3 s bound, or NIC down)");
+    }
+    if (_ag_last_echo_rc >= 0) {
+        output_diag_kv_int("icmp_echo #55   ", _ag_last_echo_rc);
+    }
+    return 0;
+}

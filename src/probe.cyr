@@ -28,13 +28,20 @@ fn _probe_fill_payload(buf, n): i64 {
 # fills the ICMPv6 checksum on send and surfaces hop limit via cmsg.
 # `scope_id` is the ifindex for link-local v6 destinations (0 for
 # global / loopback / v4). Ignored when af == 4.
-fn probe_run(target_cstr, af, addr_arg, scope_id, banner_parens, count, timeout_ms, interval_ms, size, quiet): i64 {
+#
+# `diag` (--diag) prints a per-backend first-fail dump on the two ways a
+# probe can come back with nothing: the socket never opened, or every
+# packet was lost. It is deliberately NOT gated on `quiet` — `-q --diag`
+# is the shape you want when scripting a health check, and suppressing
+# the reason along with the per-packet chatter would defeat the flag.
+fn probe_run(target_cstr, af, addr_arg, scope_id, banner_parens, count, timeout_ms, interval_ms, size, quiet, diag): i64 {
     var fd = 0;
     if (af == 6) { fd = platform_icmp6_open(); }
     else         { fd = platform_icmp_open(); }
     if (fd < 0) {
         var msg = "yo: cannot open ICMP socket — try adjusting /proc/sys/net/ipv4/ping_group_range or run with CAP_NET_RAW\n";
         syscall(_LX_SYS_WRITE, 2, msg, strlen(msg));
+        if (diag == 1) { platform_diag_dump(target_cstr, af); }
         return 2;
     }
     platform_set_recv_timeout_ms(fd, timeout_ms);
@@ -108,6 +115,9 @@ fn probe_run(target_cstr, af, addr_arg, scope_id, banner_parens, count, timeout_
     }
 
     output_summary(s);
+    if (diag == 1) {
+        if (stats_recv(s) == 0) { platform_diag_dump(target_cstr, af); }
+    }
     platform_close(fd);
     if (sigfd > 0) { platform_close(sigfd); }
 
