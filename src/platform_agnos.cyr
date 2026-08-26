@@ -26,12 +26,6 @@
 var _AG_O_RDONLY      = 0;
 var _AG_ICMP_FD       = 900;       # sentinel fd for the (socketless) ICMP path
 
-# probe.cyr's icmp-open-failure error path does a raw syscall(_LX_SYS_WRITE, ...)
-# — provide the constant here so the agnos build resolves it. AGNOS write is also
-# syscall #1 (SYS_WRITE=1, matches Linux), and the branch is dead on agnos anyway
-# (platform_icmp_open never fails here). [cleanup: route this through the stdlib.]
-var _LX_SYS_WRITE = 1;
-
 var _ag_req[256];                  # stored ICMP request (module global = 2048 B)
 var _ag_req_len  = 0;
 var _ag_req_addr = 0;

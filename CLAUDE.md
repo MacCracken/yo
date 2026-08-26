@@ -22,11 +22,13 @@
 
 Own the **`ping` surface** in the AGNOS network-tools family: ICMP echo probes against IPv4 / IPv6 hosts, RTT measurement, packet-loss accounting. Cyrius-native, **per-backend sovereignty**:
 
-- **Linux backend** (`src/platform_linux.cyr`) — POSIX `socket()` pragmatic path. Ships today.
-- **AGNOS backend** (`src/platform_agnos.cyr`, future) — sovereign `icmp_echo` / `net_send_raw` + `net_recv_raw` primitives per the kernel-grows-for-native-workloads rule. Slots in when the agnos surface lands.
-- **Windows / Apple** — post-1.0.
+- **Linux backend** (`src/platform_linux.cyr`) — POSIX `socket()` pragmatic path, reached by raw syscall number (no libc).
+- **AGNOS backend** (`src/platform_agnos.cyr`) — sovereign ring-3 syscalls only; **no POSIX, no `socket()`**, ever, on this path. The rule is per-backend, not project-wide.
+- **Windows / Apple** — post-1.0. Host kernels, so they inherit the pragmatic treatment; the sovereignty rule only bites on AGNOS.
 
-Substrate library `taar` extracts only when a second consumer (`dig` / `whirl`) drives the abstraction. Until then, everything yo needs lives inline in `src/`.
+The two backends are deliberately **not at feature parity** — the AGNOS arm stubs what the kernel does not expose rather than emulating it. Which primitives the kernel offers, and which are still asks, is state: see [`docs/development/state.md`](docs/development/state.md) § Kernel coupling. The decisions behind both are [ADR 0001](docs/adr/0001-per-backend-sovereignty.md) (why per-backend) and [ADR 0002](docs/adr/0002-focused-kernel-icmp-syscall.md) (why the kernel's ICMP syscall is focused rather than a general send/recv pair — that pair was considered and **rejected**, so do not reintroduce it from this file's earlier wording).
+
+Substrate library `taar` was extracted **on the second-consumer trigger, not from naming** — `dig` grew a real resolver, so the shared IPv4 codec moved out. The rule that produced it still stands for anything else: do not pre-build a shared lib before a second consumer drives the shape.
 
 First entry in the **network-tools family** (English-wordplay / trickster lane). Sibling tools — `whirl` (curl/wget) and `dig` (DNS) — share the **taar** substrate library (Hindi तार, *wire/connection*); per the brainstorm-window pattern the three-consumer surface justifies `taar` as a real lib from network-tools cycle open, not a private-in-yo extraction-on-second-consumer.
 

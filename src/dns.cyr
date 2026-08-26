@@ -246,7 +246,16 @@ fn _dns_parse_ptr_response(buf, len, expected_qid, out, out_cap): i64 {
 #   nameserver\t8.8.8.8     # trailing comment ok
 # Skips:
 #   # ... (comment lines)
-#   nameserver fe80::1      (IPv6 — not yet supported here)
+#   nameserver fe80::1      (IPv6 — see the limitation below)
+#
+# ⚠ KNOWN LIMITATION — a v6 resolver is silently ignored, not reported. The value
+# goes to ipv4_parse, which rejects it, so the line is skipped like a comment and
+# the caller falls through to the 1.1.1.1 fallback. On a v6-only network DNS then
+# appears to work by accident, via a hardcoded v4 address that may not be
+# reachable at all. Fixing it needs ipv6_parse on this path plus a v6 UDP query
+# socket. Tracked in docs/development/roadmap.md § 0.6.x.
+# (On AGNOS this path is usually not reached: platform_dns_server() prefers the
+# DHCP-leased resolver from net_config#61 over /etc/resolv.conf.)
 fn _dns_resolv_conf_nameserver(buf, len): i64 {
     var i = 0;
     while (i < len) {

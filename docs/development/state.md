@@ -22,11 +22,24 @@
 
 ## Current position
 
-**The 0.5.x band is closed and every backlog band with it.** § 0.6.x (AGNOS backend)
-and § 0.7.x (iron validation) were in fact achieved between 0.5.3 and 0.5.11; § 0.8.x
-(`taar` extraction) landed early at 0.5.5 when `dig` became the real second consumer.
-What remains before 1.0 is not feature work — see [`roadmap.md`](roadmap.md) § v1.0
-criteria. Two items are genuinely open:
+**Every planned backlog band is closed.** The AGNOS backend and iron validation
+(planned as § 0.6.x / § 0.7.x) were achieved between 0.5.3 and 0.5.11; the `taar`
+extraction (planned as § 0.8.x) landed early at 0.5.5 when `dig` became the real
+second consumer. The bands were named for the version they were expected to land in,
+so those labels no longer match their release — [`roadmap.md`](roadmap.md) now says so
+rather than implying the work is pending.
+
+**The open band is [`roadmap.md`](roadmap.md) § 0.6.x — deferred-work cleanup.** It was
+assembled at 0.6.0 by sweeping `src/`, `tests/`, `scripts/`, `docs/` and the CI YAML
+for deferred language: TODOs, `[cleanup:]` markers, "not yet", "planned", "future".
+Everything found was either **stale** (fixed or deleted on the spot — `CLAUDE.md` and
+`README.md` both still called the AGNOS backend "future", and `src/platform.cyr` said
+"Today: Linux only" two lines above a note that the AGNOS branch had landed) or
+**real but untracked**, in which case it is now a roadmap line rather than a comment
+nobody reads. One deferred marker remains in `src/` by design — `src/dns.cyr:249`, the
+IPv6-nameserver limitation — and it now names the roadmap item that tracks it.
+
+Beyond that band, two things are genuinely open:
 
 1. **The AGNOS QEMU smoke is still a manual gate.** CI gained `cyrius build --agnos`
    (plus `bench` and `fuzz`) at 0.6.0, so the AGNOS arm is at least *compiled* on every

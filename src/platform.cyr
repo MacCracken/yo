@@ -1,14 +1,27 @@
 # platform.cyr — platform dispatch shim.
 #
-# Today: Linux only. The platform_* surface (platform_icmp_open,
-# platform_icmp_send_to, platform_icmp_recv, platform_now_us,
-# platform_sleep_ms, platform_close, platform_set_recv_timeout_ms)
-# is defined in src/platform_linux.cyr.
+# TWO backends ship, and this #ifdef is the only seam between them. Each defines
+# the same 21-function platform_* surface; probe.cyr and dns.cyr call that surface
+# and never learn which one they got.
 #
-# AGNOS branch landed 2026-06-14: src/platform_agnos.cyr replaces the POSIX
-# socket() path with the sovereign icmp_echo(#55) + udp_bind/send/recv/unbind
-# (#51-54) + getrandom(#45) + FS syscalls via the CYRIUS_TARGET_AGNOS peer
-# (cyrius >= 6.2.3). Windows / macOS branches still TODO.
+#   src/platform_linux.cyr   POSIX sockets, reached by raw syscall number (no
+#                            libc). Unprivileged AF_INET SOCK_DGRAM ICMP with a
+#                            SOCK_RAW fallback.
+#   src/platform_agnos.cyr   No POSIX. Sovereign ring-3 agnos syscalls —
+#                            icmp_echo(#55), udp_bind/send/recv/unbind (#51-54),
+#                            net_config(#61), getrandom(#45), uptime/sleep
+#                            (#40/#41). Landed 0.5.3; iron-validated on the agnos
+#                            1.51.7 burn; gated in CI by `cyrius build --agnos`
+#                            and locally by scripts/agnos-qemu-smoke.sh.
+#
+# The two are NOT at feature parity, and that is deliberate rather than unfinished
+# — the AGNOS arm stubs what the kernel does not expose (ICMPv6, ifindex, signal
+# infra) and cannot honour -W. See docs/adr/0001-per-backend-sovereignty.md for
+# the rule and docs/adr/0002-focused-kernel-icmp-syscall.md for the costs.
+#
+# Windows / macOS are post-1.0 (roadmap.md § Future). They are host kernels, so
+# they inherit the pragmatic Linux treatment when they arrive; the sovereignty
+# rule only bites on AGNOS.
 
 #ifdef CYRIUS_TARGET_AGNOS
 include "src/platform_agnos.cyr"

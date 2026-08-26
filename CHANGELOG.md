@@ -75,6 +75,32 @@ real bug that had shipped since 0.3.0, so it carries that fix too.
   reached it — a break there used to land green.
 
 ### Changed
+- **Deferred-language sweep across `src/`, `tests/`, `scripts/`, `docs/` and the CI
+  YAML.** Every TODO, `[cleanup:]` marker, "not yet", "planned" and "future" was
+  read and resolved one of two ways — fixed if stale, or written into
+  `roadmap.md` **§ 0.6.x** if real. Nothing was left as an untracked comment.
+  Stale ones found and fixed:
+  - `CLAUDE.md` § Goal called the AGNOS backend "future … slots in when the agnos
+    surface lands", and promised `net_send_raw` / `net_recv_raw` primitives that
+    ADR 0002 rejects. It also still said `taar` "extracts only when a second
+    consumer drives the abstraction. Until then, everything yo needs lives inline
+    in `src/`" — it extracted at 0.5.5. Rewritten to carry the durable rule and
+    point at state.md for the state, per the file's own core rule.
+  - `README.md` called AGNOS "planned", promised the same rejected primitives,
+    repeated the `taar` claim, documented **`scripts/install.sh`, which does not
+    exist**, and showed example output with the wrong payload size (64 B; the
+    default is 56) and no `ttl=` field, which has been displayed since 0.4.3.
+  - `src/platform.cyr` opened with "Today: Linux only" — two lines above its own
+    note that the AGNOS branch had landed, and listing 7 of what are now 21
+    `platform_*` functions.
+- **Every raw `write` now goes through `sys_write`.** Chasing the
+  `[cleanup: route this through the stdlib.]` marker that had sat in
+  `src/platform_agnos.cyr` since 0.5.3 turned up seven call sites — `_puts`,
+  `_eputs`, `_emit_lf`, `cli_print_usage`, `_output_puts` and two single-byte
+  writes — all spelled `syscall(1, ...)`, which hardcodes the **x86_64** write
+  number (it is 64 on aarch64). `sys_write` is arch-dispatched. Both
+  `_LX_SYS_WRITE` constants are now unreferenced and deleted. Output verified
+  byte-identical across help, usage-error, IPv4, IPv6 and `--diag`.
 - **`docs/development/roadmap.md` reconciled with reality.** § 0.6.x (AGNOS
   backend), § 0.7.x (iron validation) and § 0.8.x (`taar` extraction) are all
   **closed** — and had been for some time. Both AGNOS gates closed months ago

@@ -39,7 +39,7 @@
 
 Ordered by dependency. Items further down depend on items earlier.
 
-### 0.4.x — DNS + UX polish (Linux-only feature work)
+### DNS + UX polish *(0.4.x)* — **CLOSED**
 
 Everything in this band is achievable on the Linux backend alone — no new platform integration needed.
 
@@ -49,7 +49,7 @@ Everything in this band is achievable on the Linux backend alone — no new plat
 - [x] **Multiple targets** (`yo router 8.8.8.8`) — landed in 0.4.2. Sequential per-target probe with own banner + summary; aggregate exit code (`0` any-reply / `2` any-error-no-reply / `1` otherwise). Unresolvable hosts log to stderr and don't abort the run.
 - [x] **TTL / hop-limit display** — landed in 0.4.3. `IP_RECVTTL` enabled on the socket; `recvmsg`-based `platform_icmp_recv_ext` walks the cmsg chain for `(IPPROTO_IP, IP_TTL)`. Per-packet output renders `seq=N  ttl=T  rtt=X.XX ms`; chunk omitted gracefully when the kernel doesn't surface a TTL cmsg.
 
-### 0.5.x — IPv6
+### IPv6 *(0.5.x)* — **CLOSED**
 
 - [x] **IPv6 colon-hex parser** (`::1`, `2001:db8::1`, full 8-group) — landed in 0.5.0. `src/ipv6.cyr`, 16 packed bytes network-order, single `::` per RFC 4291, case-insensitive. Scope IDs and IPv4-embedded textual form deferred.
 - [x] **ICMPv6 framing** — landed in 0.5.0. Echo Request = type 128, Reply = 129. Kernel fills the checksum on AF_INET6 SOCK_DGRAM when `IPV6_CHECKSUM` is enabled with offset=2 (no pseudo-header math needed in yo).
@@ -57,7 +57,7 @@ Everything in this band is achievable on the Linux backend alone — no new plat
 - [x] **AAAA DNS lookup + `-4` / `-6` flags** — landed in 0.5.1. `dns_resolve_aaaa` issues type-28 queries; `-4` / `-6` restrict resolution to one family with `CLI_ERR_AF_CONFLICT` on both. `ip6.arpa` PTR reverse-DNS also in 0.5.1; RFC 5952 canonical formatter for AAAA-resolved banners.
 - [x] **Scope IDs + IPv4-embedded form** — landed in 0.5.2. `ipv6_parse_ex` splits `%zone`; `platform_resolve_ifindex` (Linux: `/sys/class/net/<iface>/ifindex`) maps to sin6_scope_id. `_ipv6_parse_with_v4` accepts `::ffff:1.2.3.4`, `2001:db8::1.2.3.4`, and the full no-`::` form. v4-mapped addresses dispatch through the IPv4 socket because ICMPv6 can't carry an ICMPv4 probe. RFC 5952 §5 v4-mapped output. **0.5.x band closed.**
 
-### 0.6.x — AGNOS backend — **CLOSED (0.5.3 … 0.5.11)**
+### AGNOS backend *(planned as 0.6.x — actually landed 0.5.3 … 0.5.11)* — **CLOSED**
 
 **Both gates are closed, and both were closed for a while before this file noticed.**
 Verified against live source 2026-08-26, not against sibling-repo prose:
@@ -92,7 +92,7 @@ Verified against live source 2026-08-26, not against sibling-repo prose:
       matches replies inside the kernel, so there is no per-process listener to
       register. Kept visible rather than deleted because it was a planned item.
 
-### 0.7.x — Iron validation (AGNOS backend) — **CLOSED**
+### Iron validation *(planned as 0.7.x — landed via agnos burns 1.45.16 / 1.51.7)* — **CLOSED**
 
 Validated on archaemenid, recorded in **agnos's** CHANGELOG (yo's own docs missed it
 for four releases):
@@ -113,7 +113,7 @@ for four releases):
       that IS reachable — the DHCP lease — plus the raw `icmp_echo` return. Counters
       remain an agnos-side ask, not a yo one.
 
-### 0.8.x — `taar` substrate extraction — **CLOSED (landed early, at 0.5.5)**
+### `taar` substrate extraction *(planned as 0.8.x — landed early at 0.5.5)* — **CLOSED**
 
 The trigger fired ahead of schedule: `dig` grew a real DNS resolver and became the
 genuine second consumer, exactly as [[feedback-yo-extract-after-second-consumer]]
@@ -126,9 +126,74 @@ required. The extraction was not pre-built from naming.
       exactly one taar symbol, `ipv4_parse`; the bundle's `socket`/`dns` modules ride
       along and DCE out.
 
-> **What actually remains before 1.0 is in § v1.0 criteria below** — there is no open
-> backlog band left. The work is docs, an audit pass, and closing the two measurement
-> criteria.
+> **Every band above is closed.** The bands were named for the version they were
+> expected to land in; three of them landed early, which is why their labels no
+> longer match their release. The open work is § 0.6.x below plus § v1.0 criteria.
+
+### 0.6.x — deferred-work cleanup *(open — this is the current band)*
+
+Collected by a deferred-language sweep of `src/`, `tests/`, `scripts/`, `docs/` and
+the workflow YAML at 0.6.0. Everything here was previously a comment, an aside, or a
+line of prose promising future work; nothing was tracked. Split by who can act.
+
+**yo-owned — actionable in this repo:**
+
+- [x] **Every raw `write` routed through the stdlib** — done in 0.6.0. The
+      `[cleanup: route this through the stdlib.]` marker had sat in
+      `src/platform_agnos.cyr` since 0.5.3: the AGNOS arm defined a Linux-named
+      `_LX_SYS_WRITE = 1` purely so `probe.cyr`'s error path would resolve there.
+      Fixing it properly meant fixing all of them — `_puts`, `_eputs`, `_emit_lf`,
+      `cli_print_usage`, `_output_puts` and the two single-byte writes were all
+      `syscall(1, ...)`, which hardcodes the **x86_64** write number (it is 64 on
+      aarch64). All now call `sys_write`, which is arch-dispatched, and both
+      `_LX_SYS_WRITE` constants are deleted. Output verified byte-identical.
+- [ ] **IPv6 nameservers in `/etc/resolv.conf` are ignored** (`src/dns.cyr:249`). The
+      parser reads `nameserver <addr>` lines and passes the value to `ipv4_parse`, so a
+      `nameserver fe80::1` or any v6 resolver is silently skipped. On a v6-only network
+      yo falls through to the `1.1.1.1` fallback and DNS appears to work by accident.
+      Needs `ipv6_parse` on that path plus a v6 UDP query socket.
+- [x] **`README.md` reconciled** — done in 0.6.0. It documented `scripts/install.sh`,
+      which does not exist; described the AGNOS backend as "planned"; promised
+      `net_send_raw` primitives that [ADR 0002](../adr/0002-focused-kernel-icmp-syscall.md)
+      rejected; said `taar` "extracts when the second consumer arrives" (it did, at
+      0.5.5); and showed example output with the wrong payload size and no TTL.
+- [ ] **`--aarch64` builds clean and would be wrong.** `src/platform_linux.cyr:22-34`
+      hardcodes x86_64 syscall numbers; the aarch64 stdlib peer has no `SYS_SENDTO`, so
+      `44` would arrive as `fstatfs(2)`. Latent — yo ships x86_64 only — but it blocks
+      any future aarch64 target and a green build must not be read as support. Fix is
+      to route through the arch-dispatched `sys_*` wrappers and add a CI leg that
+      *runs* the binary under `qemu-aarch64`. taar hit this exact defect at its 0.3.3.
+      **Partially reduced in 0.6.0**: every raw `write` now goes through `sys_write`,
+      so the output path is arch-clean. What remains is the socket surface —
+      `_LX_SYS_SOCKET`, `_LX_SYS_SENDTO`, `_LX_SYS_RECVFROM`, `_LX_SYS_RECVMSG`,
+      `_LX_SYS_SETSOCKOPT`, `_LX_SYS_OPEN`, `_LX_SYS_CLOSE`, `_LX_SYS_READ`,
+      `_LX_SYS_NANOSLEEP`, `_LX_SYS_CLOCK_GETTIME`, `_LX_SYS_SIGNALFD4`,
+      `_LX_SYS_RT_SIGPROCMASK`.
+- [ ] **Decide the binary-size criterion** — see § v1.0 criteria. Either file the
+      section-GC ask against cyrius or restate the gate. Do not let it lapse silently.
+
+**Blocked on agnos — kernel asks, not yo work:**
+
+| Ask | Unblocks | Where yo stubs it |
+|---|---|---|
+| An ICMPv6 syscall | `yo -6` on AGNOS | `platform_icmp6_*` return `-1` (`platform_agnos.cyr:158-160`) |
+| An interface-index lookup | `%zone` scope IDs on AGNOS | `platform_resolve_ifindex` returns 0 (`:163`) |
+| Ring-3 signal/interrupt infra | Ctrl-C interruption on AGNOS | watch reports unavailable (`:167-168`) |
+| `icmp_echo(dst_ip, timeout_ms)` | `-W` on AGNOS (the ~3 s bound is fixed in-kernel) | `_ag_timeout_ms` is read only by the UDP path |
+| ICMP tx/rx counters | the counters roadmap § 0.7.x asked `--diag` for | `--diag` dumps the DHCP lease instead |
+| Reply-match on identifier **and sequence** | removes an untested concurrency hazard — the kernel matches on identifier only (`net_icmp.cyr:48`), so one ping is in flight kernel-wide | nothing; yo never exercises it (see [ADR 0002](../adr/0002-focused-kernel-icmp-syscall.md)) |
+
+**Blocked on cyrius:**
+
+- [ ] **Section GC / real dead-code stripping.** `CYRIUS_DCE=1` NOPs unreachable
+      functions; it does not remove them, so the binary is byte-identical either way.
+
+**Family hygiene:**
+
+- [ ] **`dig` and `whirl` trail yo's toolchain.** yo is on cyrius 6.5.35 / taar 0.5.0;
+      `dig` is on 6.2.24 / taar 0.3.1 and `whirl` on 6.4.25 / taar 0.3.1. yo's 0.5.8
+      migration evidence (zero stdlib removals across the three-band jump) applies to
+      both; `whirl` carries the larger risk since it pulls the crypto/TLS leaves.
 
 ---
 
