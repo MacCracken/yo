@@ -122,7 +122,7 @@ target.
   to grow a socket layer it does not want.
 - **The audit is scoped and cheap** — one file, 21 functions, and `grep socket
   src/platform_agnos.cyr` is the whole check.
-- **Both arms are proven, not asserted.** Linux: 373/373 assertions green, plus iron use.
+- **Both arms have run for real — with very different regression coverage.** Linux: 386/386 assertions green, plus daily iron use.
   AGNOS: two manual iron burns recorded in agnos's CHANGELOG (1.45.16 — `yo google.com`
   2/4 = 50% loss on an RX-ring overflow, fixed in 1.45.17; 1.51.7 on 2026-07-02 — 4/4 at
   0% loss), and yo 0.5.11's `scripts/agnos-qemu-smoke.sh` against the SLIRP gateway
@@ -157,7 +157,7 @@ target.
 
 - **The host build cannot exercise the AGNOS arm at all.** The `#ifdef` excludes it, so
   `cyrius build` never compiles `src/platform_agnos.cyr` and `cyrius test` never reaches
-  it: of the 373 assertions in `tests/yo.tcyr`, **zero** reference the AGNOS backend
+  it: of the 386 assertions in `tests/yo.tcyr`, **zero** reference the AGNOS backend
   (`grep -c 'platform_agnos\|_ag_' tests/yo.tcyr` → 0). The only two things that touch
   that arm are `cyrius build --agnos src/main.cyr build/yo-agnos` (proves it assembles)
   and `scripts/agnos-qemu-smoke.sh` (proves it runs). Since 0.6.0
@@ -194,10 +194,10 @@ target.
   becomes real on the ICMP path; if the reply TTL is ever surfaced, `:72`'s nominal 64
   goes away. ICMP tx/rx counters for `--diag` were asked for in roadmap § 0.7.x and remain
   a kernel ask — `net_config` has exactly fields 0..3 and returns -1 for anything else.
-- **Size is not the argument for either side.** The host build is 152,704 B against
-  `/usr/bin/ping` (iputils 20250605) at 155,160 B; `.text` is 145,232 B; the agnos build
-  is 150,312 B. `CYRIUS_DCE=1` reports "400 unreachable fns (68740 bytes NOPed)" and the
-  file is still exactly 152,704 B — NOPed, not removed. This decision buys correctness of
+- **Size is not the argument for either side.** The host build is 152,696 B against
+  `/usr/bin/ping` (iputils 20250605) at 155,160 B; `.text` is 145,184 B; the agnos build
+  is 150312 B. `CYRIUS_DCE=1` reports "397 unreachable fns (68416 bytes NOPed)" and the
+  file is still exactly 152,696 B — NOPed, not removed. This decision buys correctness of
   posture, not bytes.
 
 ## Alternatives considered

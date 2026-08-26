@@ -136,6 +136,33 @@ Collected by a deferred-language sweep of `src/`, `tests/`, `scripts/`, `docs/` 
 the workflow YAML at 0.6.0. Everything here was previously a comment, an aside, or a
 line of prose promising future work; nothing was tracked. Split by who can act.
 
+> ## ⏸ 0.6.1 IS GATED ON A CYRIUS RELEASE
+>
+> **agnos 1.56.48 (2026-08-26) closed four of the six kernel asks below** — `#100
+> icmp_echo_ex`, the `net_config` ICMP counters, id+seq reply matching, and the discovery
+> that ring-3 signals already existed. **yo cannot consume any of it yet.**
+>
+> The peers exist in the **cyrius working tree** — `SYS_ICMP_ECHO_EX = 100`,
+> `sys_icmp_echo_ex(dst_ip, timeout_ms)`, and `sys_net_icmp_tx` / `_rx` /
+> `_replies_sent` / `_timeouts` — but the newest cyrius **release** is **6.5.35**, which
+> is what `cyrius.cyml` pins and what `cyrius deps` vendors into `lib/`. Until a release
+> carries them, those symbols do not resolve in a yo build.
+>
+> ⛔ **Do not work around this by calling the numbers directly.** A raw
+> `syscall(100, ip, ms)` would compile clean and is exactly the bug class agnos's roadmap
+> tracks — the number space deliberately overlaps Linux's, so a raw literal dispatches a
+> different arm on the other backend. The whole point of the wrapper is that the number
+> lives in one place.
+>
+> **What unblocks 0.6.1:** a cyrius release **> 6.5.35** containing those wrappers, then
+> `cyrius.cyml` repins and `cyrius deps` re-vendors. **What 0.6.1 then does:**
+> honour `-W` on AGNOS via `sys_icmp_echo_ex`; add the four counters to `--diag`'s AGNOS
+> block, which is what turns "no reply" into "we sent 4 and nothing came back" versus
+> "we never transmitted"; and wire Ctrl-C on AGNOS through `signalfd`#18.
+>
+> **Not gated on cyrius**, so available now if 0.6.1 wants them: the aarch64 socket
+> surface, the IPv6-nameserver gap in `resolv.conf`, and the binary-size decision.
+
 **yo-owned — actionable in this repo:**
 
 - [x] **Every raw `write` routed through the stdlib** — done in 0.6.0. The
@@ -169,19 +196,48 @@ line of prose promising future work; nothing was tracked. Split by who can act.
       `_LX_SYS_SETSOCKOPT`, `_LX_SYS_OPEN`, `_LX_SYS_CLOSE`, `_LX_SYS_READ`,
       `_LX_SYS_NANOSLEEP`, `_LX_SYS_CLOCK_GETTIME`, `_LX_SYS_SIGNALFD4`,
       `_LX_SYS_RT_SIGPROCMASK`.
+- [ ] **Ctrl-C on AGNOS is a yo-side stub, not a kernel gap.**
+      `platform_install_interrupt_watch` returns `-1` in `src/platform_agnos.cyr`, so a
+      continuous probe cannot be interrupted there. Discovered 2026-08-26: agnos *does*
+      implement `sigprocmask`#17 and `signalfd`#18. The Linux arm uses `signalfd4`(289) +
+      `rt_sigprocmask`(14); the agnos numbers differ, so this needs the cyrius agnos
+      wrappers and a `#ifdef` arm, not new kernel work.
 - [ ] **Decide the binary-size criterion** — see § v1.0 criteria. Either file the
       section-GC ask against cyrius or restate the gate. Do not let it lapse silently.
 
-**Blocked on agnos — kernel asks, not yo work:**
+**Blocked on agnos — mostly CLOSED in agnos 1.56.48 (2026-08-26):**
 
-| Ask | Unblocks | Where yo stubs it |
-|---|---|---|
-| An ICMPv6 syscall | `yo -6` on AGNOS | `platform_icmp6_*` return `-1` (`platform_agnos.cyr:158-160`) |
-| An interface-index lookup | `%zone` scope IDs on AGNOS | `platform_resolve_ifindex` returns 0 (`:163`) |
-| Ring-3 signal/interrupt infra | Ctrl-C interruption on AGNOS | watch reports unavailable (`:167-168`) |
-| `icmp_echo(dst_ip, timeout_ms)` | `-W` on AGNOS (the ~3 s bound is fixed in-kernel) | `_ag_timeout_ms` is read only by the UDP path |
-| ICMP tx/rx counters | the counters roadmap § 0.7.x asked `--diag` for | `--diag` dumps the DHCP lease instead |
-| Reply-match on identifier **and sequence** | removes an untested concurrency hazard — the kernel matches on identifier only (`net_icmp.cyr:48`), so one ping is in flight kernel-wide | nothing; yo never exercises it (see [ADR 0002](../adr/0002-focused-kernel-icmp-syscall.md)) |
+Four of the six asks below were resolved kernel-side. What yo does with them is 0.6.1
+work, gated on cyrius shipping the wrappers (they exist in the cyrius tree; a release
+carrying them is what yo can pin).
+
+- [x] **`icmp_echo(dst_ip, timeout_ms)` → minted as `#100 icmp_echo_ex`.** `-W` is
+      honourable on AGNOS. QEMU-proven: a 200 ms deadline against a black hole returned
+      `-1` after **exactly 200 ms**, where the old fixed bound took ~3 s. ⚠ It is a
+      **new syscall number, not a second argument to `#55`** — measured on cyrius 6.5.35,
+      unused syscall argument registers carry stale data rather than zero, so widening a
+      live arm would have handed every shipped one-argument caller a garbage bound.
+- [x] **ICMP tx/rx counters → `net_config`#61 fields 4..7.** `icmp_tx` / `icmp_rx` /
+      `icmp_replies_sent` / `icmp_timeouts`. This is what `--diag` on AGNOS was missing:
+      `tx > 0` with `rx == 0` is a network problem, `tx == 0` is a local one. QEMU-proven
+      self-consistent (`tx = rx + timeouts`).
+- [x] **Reply-match on identifier AND sequence.** The hazard [ADR 0002](../adr/0002-focused-kernel-icmp-syscall.md)
+      filed as *untested, not broken* is now **closed rather than merely untested**:
+      `icmp_id` is a per-kernel constant, so an id-only match let a late reply to a
+      previous ping satisfy whichever wait was open. `net_handle_icmp` now requires seq.
+- [x] **Ring-3 signal infra — it already existed.** `sigprocmask`#17 and `signalfd`#18
+      have kernel arms (`syscall.cyr`). **This was never an agnos gap**;
+      `platform_install_interrupt_watch` returning `-1` on AGNOS is a yo-side stub. Moved
+      to the yo-owned list above — Ctrl-C on AGNOS is our work, not the kernel's.
+- [ ] **An ICMPv6 syscall — now formally backlogged on agnos**, not merely absent.
+      `grep -rliE 'ipv6|0x86DD' agnos/kernel/` returns nothing: no ethertype arm, no
+      128-bit address type, no NDP, no v6 routing. It is a **subsystem, not a syscall**,
+      and NDP *is* ICMPv6, so ICMPv6 is a prerequisite of basic v6 reachability rather
+      than a feature on top. Filed in agnos's `roadmap.md` § OPEN, `unslotted`.
+- [ ] ~~An interface-index lookup~~ — **withdrawn as an ask.** agnos is single-NIC with no
+      index concept, so the syscall would be `return 1` with nothing to scope. `%zone`
+      scope IDs are meaningless until link-local v6 exists, i.e. this is subsumed by the
+      IPv6 item and is not separately useful.
 
 **Blocked on cyrius:**
 
@@ -233,7 +289,7 @@ the code and against measurements, not against this file's own prior claims.
       no socket call and, since 0.5.10, no raw syscall numbers either — everything
       goes through named cyrius wrappers. Formalised in
       [ADR 0001](../adr/0001-per-backend-sovereignty.md).
-- [x] **Tests**: ≥ 100 assertions — **373** in `tests/yo.tcyr`, covering arg parsing,
+- [x] **Tests**: ≥ 100 assertions — **386** in `tests/yo.tcyr`, covering arg parsing,
       framing, checksum, IPv4 + IPv6 parsing, RTT format, summary computation and
       error paths. `tests/yo.fcyr` and `tests/yo.bcyr` both build and run green. The
       gate itself is sound as of 0.5.9 (exit codes clamped).
@@ -262,13 +318,13 @@ anything was measured. Measured on archaemenid 2026-08-26:
 | | yo 0.6.0 | iputils `ping` 20250605 | verdict |
 |---|---|---|---|
 | wall clock, `-c 1 -n 127.0.0.1`, best of 3 × 100 | **381 µs/run** | 458 µs/run | yo ~17% **faster** — passes, and by more than parity |
-| binary on disk | **152,704 B** | 155,160 B | yo slightly smaller |
+| binary on disk | **152,696 B** | 155,160 B | yo slightly smaller |
 
 - [x] **Wall-clock parity** — met, and exceeded.
 - [ ] **Binary size ≤ 30 KB after DCE — WITHDRAWN AS WRITTEN, needs a new number.**
       The premise is false: `CYRIUS_DCE=1` **NOPs** unreachable functions, it does not
       strip them. The file is byte-for-byte the same size with and without it
-      (152,704 B either way; 400 unreachable fns / 68,740 bytes NOPed). So "≤ 30 KB
+      (152,696 B either way; 397 unreachable fns / 68,416 bytes NOPed). So "≤ 30 KB
       after DCE" is not a target yo can hit by any flag it controls — it is a request
       for a linker/GC pass cyrius does not have. Roughly 144 KB of the binary is
       `.text`, most of it the vendored stdlib plus taar's 979-line bundle riding along

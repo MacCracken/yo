@@ -129,6 +129,16 @@ real bug that had shipped since 0.3.0, so it carries that fix too.
   `scripts/agnos-qemu-smoke.sh` still PASSes after the probe-loop change.
 - Every runtime path re-verified after the fix: DGRAM v4, DGRAM v6, DNS, `%zone`,
   v4-mapped, RAW v4 in a namespace, and AGNOS under QEMU.
+- **Upstream, not yo:** agnos **1.56.48** (2026-08-26) closed four of the six kernel asks
+  this roadmap had filed — `#100 icmp_echo_ex(dst_ip, timeout_ms)`, ICMP counters on
+  `net_config`#61 fields 4..7, echo-reply matching on **id + sequence** (which closes the
+  hazard [ADR 0002](docs/adr/0002-focused-kernel-icmp-syscall.md) filed as *untested, not
+  broken*), and the discovery that ring-3 signals already existed, making Ctrl-C on AGNOS
+  a yo-side stub rather than a kernel gap. **None of it is consumed here.** ⏸ **0.6.1 is
+  gated on a cyrius release > 6.5.35** carrying the wrappers (`SYS_ICMP_ECHO_EX`,
+  `sys_icmp_echo_ex`, `sys_net_icmp_*`); they exist in cyrius's tree, not in any release,
+  and calling the raw numbers instead is precisely the mis-dispatch bug class agnos's
+  roadmap tracks. See `docs/development/roadmap.md` § 0.6.x.
 - Known latent, unchanged: `--aarch64` builds clean and would be wrong
   (`platform_linux.cyr` hardcodes x86_64 syscall numbers; the aarch64 peer has no
   `SYS_SENDTO`). yo ships x86_64 only.

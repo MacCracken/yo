@@ -322,8 +322,8 @@ that the round-trip depends on (`icmp.cyr:67-69`: a valid message sums to zero
 with the checksum field left in place), it is the only test yo has that
 `icmp_checksum` is correct in both directions, and it is what `_ag_icmp_pong`'s
 synthesised reply is implicitly relying on. Being unreachable from `main`, it
-falls in the set `CYRIUS_DCE=1` NOPs (400 functions, 68,740 bytes — which does
-not shrink the file; `build/yo` is 152,704 B either way). Keep it; just do not
+falls in the set `CYRIUS_DCE=1` NOPs (397 functions, 68,416 bytes — which does
+not shrink the file; `build/yo` is 152,696 B either way). Keep it; just do not
 read its existence as evidence that the probe path checks checksums.
 
 ## Reproducing
