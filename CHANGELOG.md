@@ -4,6 +4,72 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.8] — 2026-08-26 (toolchain 6.5.35; taar 0.5.0)
+
+Pure toolchain + dependency bump — **no source edits, no behaviour change**.
+
+### Changed
+- **Toolchain pin 6.2.24 → 6.5.35.** Three minor bands (6.3.x, 6.4.x, 6.5.x) in one
+  step. Verified source-clean *before* building, by diffing cyrius's own
+  `docs/api-surface.snapshot` between the two tags, filtered to the eleven stdlib
+  modules yo declares: the surface grew **219 → 280 symbols with zero removals and
+  zero arity changes**. Nothing yo calls moved. This also clears the
+  `cyrius.cyml pins 6.2.24 but cycc is 6.5.35` drift warning — 6.2.24 was no longer
+  installed locally, so the pin had stopped describing what actually compiled yo.
+- **`taar` dep 0.3.1 → 0.5.0.** yo consumes exactly one taar symbol — `ipv4_parse`
+  (`src/dns.cyr:287`, `src/main.cyr:91`, `src/ipv6.cyr:163`) — and it is byte-identical
+  across the bump. Everything 0.4.0/0.5.0 changed lives in the `socket`/`dns` half of
+  the bundle that DCEs out of yo's binary: AGNOS `taar_tcp_recv` now reports a deadline
+  expiry as `_TAAR_ERR_TIMEOUT` instead of collapsing it into `0`, plus a DNS TCP
+  fallback on truncation. taar 0.5.0 is itself pinned to 6.5.35, so this bump also puts
+  yo and its substrate back on one toolchain.
+- **Vendored stdlib snapshot refreshed** — 23 of 27 `lib/*.cyr` changed hash
+  (`cyrius.lock`); no files added or removed. `args_agnos.cyr`, `args_win.cyr`,
+  `flags.cyr` and `str.cyr` were already current.
+
+### Notes
+- Host **and** `--agnos` build clean; **365/365 tests** green, unchanged from 0.5.7.
+  `cyrius bench` (`tests/yo.bcyr`) and `cyrius fuzz` (`tests/yo.fcyr`) also compile and run
+  green at this pin — neither is wired into CI, which gates only `deps`/`build`/`test`.
+- Smoke-tested on archaemenid across every resolution path, not just the compile:
+  `yo 127.0.0.1` and `yo ::1` (ttl + reverse DNS → `(localhost)`), `yo dns.google`
+  (forward A — the live `ipv4_parse` call site), `yo ::1%lo` (scope id), and
+  `yo ::ffff:127.0.0.1` (v4-mapped → ICMPv4 dispatch). All exit 0 with replies.
+- Build grew to ~145 KB (148,120 B) pre-DCE, 400 unreachable fns (was 349 on the prior
+  snapshot). The growth is the larger vendored stdlib plus taar's 979-line bundle — all
+  of it DCE-eligible (`CYRIUS_DCE=1`), none of it reachable.
+
+### Known latent (found while verifying the bump, not introduced by it)
+- **`cyrius build --aarch64` returns OK and must not be trusted.** `src/platform_linux.cyr:20-32`
+  hardcodes x86_64 syscall numbers (`_LX_SYS_SENDTO = 44`, `_LX_SYS_OPEN = 2`, …). The aarch64
+  backend remaps only numbers it holds constants for, and the 6.5.35 aarch64 peer
+  (`lib/syscalls_aarch64_linux.cyr`) has **no `SYS_SENDTO` at all** — so `44` would arrive as
+  `fstatfs(2)`. taar hit exactly this and documented it at its 0.3.3: a clean `--aarch64` build
+  whose `taar_udp_send` silently ran `fstatfs` and scribbled a `struct statfs` over the query
+  buffer. **yo ships x86_64 only, so this is latent, not live.** If an aarch64 target is ever
+  added, route `platform_linux.cyr` through the arch-dispatched stdlib wrappers (`sys_socket`,
+  `sys_sendto`, `sys_recvfrom`, …) rather than raw numbers, and add a CI leg that *runs* the
+  binary under `qemu-aarch64` — a build-only leg cannot catch this.
+- **The three test entry points don't clamp their exit code.** `assert_summary()` returns the raw
+  failure *count* (`lib/assert.cyr:186`), and `tests/yo.tcyr` ends in a bare `syscall(60, exit_code)`.
+  A wait status is 8 bits, so exactly 256/512/768 failures would exit 0 and score PASS. yo has 365
+  assertions, so 256 is reachable. Not hit here — this release failed 0 — but the gate is not sound.
+  `cyrius init`'s current template clamps (`if (exit_code > 0) { exit_code = 1; }`) and uses
+  `sys_exit_group`, which is also the portable spelling (`60` is x86_64-only). Left for its own
+  change per the one-change-at-a-time rule.
+
+### Documentation
+- **`docs/development/state.md`: AGNOS gate #1 is closed and has been for some time.**
+  The blocker section (written 2026-06-03 against pin 6.0.51) claimed `cyrius/lib/args.cyr`
+  had no `CYRIUS_TARGET_AGNOS` branch, so an agnos build would see zero args. Checked
+  against the live vendored source: `lib/args.cyr:99` dispatches to `lib/args_agnos.cyr`,
+  which recovers argc/argv from the SysV init stack via an entry-parked `r15` (cyrius
+  6.0.87 / 6.1.32). Its hash is *unchanged* by this bump — it was already present at the
+  6.2.24 pin, so the doc was stale rather than newly outdated. **The remaining AGNOS gate
+  is the ring-3 `icmp_ping`/UDP/ifindex syscall surface in agnos, alone.**
+- state.md was also still headed "0.5.6" — it never got its 0.5.7 refresh. Now current.
+
+
 ## [0.5.7] — 2026-06-23
 
 ### Changed

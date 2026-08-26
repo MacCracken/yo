@@ -2,7 +2,7 @@
 
 > **⚠ NOT A LOG.** Live state with pointers — current truth only. Per-release history → [`../../CHANGELOG.md`](../../CHANGELOG.md). Milestone path → [`roadmap.md`](roadmap.md).
 >
-> **Last refresh**: 2026-06-19 (0.5.6 — toolchain pin → 6.2.24, taar dep → 0.3.0; host + `--agnos` build clean, 365/365 tests green). Prior refresh 2026-06-03 (toolchain pin → 6.0.51; **AGNOS blocker re-assessed against the live cyrius + agnos *source*, not agnos's stale state.md** — the old "r8169 Attempt 97 pending" framing is dead: iron RX is proven, the kernel already has the ICMP logic in-tree, and Cyrius already has a working `CYRIUS_TARGET_AGNOS` emit target. The real, *narrow* gates are now: a `CYRIUS_TARGET_AGNOS` branch in `cyrius/lib/args.cyr`, and promoting the kernel's `icmp_ping` to a ring-3 syscall. See § AGNOS blocker for the code-grounded breakdown). 0.5.2 cut (scope IDs + IPv4-embedded textual form) was 2026-05-23; 0.5.x band closed.
+> **Last refresh**: 2026-08-26 (0.5.8 — toolchain pin → 6.5.35, taar dep → 0.5.0; host + `--agnos` build clean, 365/365 tests green, every resolution path smoke-tested on iron). **AGNOS gate #1 is CLOSED** — `cyrius/lib/args.cyr:99` has had a `CYRIUS_TARGET_AGNOS` branch (→ `lib/args_agnos.cyr`, argc/argv off the SysV init stack via an entry-parked `r15`) since cyrius 6.0.87/6.1.32; the § AGNOS blocker text below asserted the opposite and was stale, not wrong-when-written. The sole remaining gate is the ring-3 `icmp_ping`/UDP/ifindex syscall surface in agnos. Skipped a 0.5.7 refresh, so this covers two releases. Prior refresh 2026-06-03 (toolchain pin → 6.0.51; **AGNOS blocker re-assessed against the live cyrius + agnos *source*, not agnos's stale state.md** — the old "r8169 Attempt 97 pending" framing is dead: iron RX is proven, the kernel already has the ICMP logic in-tree, and Cyrius already has a working `CYRIUS_TARGET_AGNOS` emit target. The real, *narrow* gates are now: a `CYRIUS_TARGET_AGNOS` branch in `cyrius/lib/args.cyr`, and promoting the kernel's `icmp_ping` to a ring-3 syscall. See § AGNOS blocker for the code-grounded breakdown). 0.5.2 cut (scope IDs + IPv4-embedded textual form) was 2026-05-23; 0.5.x band closed.
 
 ---
 
@@ -10,10 +10,10 @@
 
 | Field | Value |
 |---|---|
-| Current version | **0.5.6** — toolchain 6.2.24 + taar 0.3.0 dep bump (0.5.5: IPv4 codec folded onto taar) |
-| Status | **Linux MVP at full POSIX-ping output parity for v4 + v6** — `yo dns.google` (A default), `yo -6 dns.google` (AAAA), `yo ::1` (ip6.arpa PTR → `(localhost)`), `yo fe80::<self>%enp1s0` (link-local via scope id), `yo ::ffff:127.0.0.1` (v4-mapped routed through ICMPv4). AGNOS backend gated on two narrow items — a `CYRIUS_TARGET_AGNOS` branch in `cyrius/lib/args.cyr`, and exposing the kernel's existing `icmp_ping` as a ring-3 syscall (see § AGNOS blocker). The Cyrius agnos *target itself already works*. 0.5.x band closed. |
-| Build size | ~117 KB (adds IPv4-embedded parse + scope-id plumbing + ifindex resolver + v4-mapped output formatter, pre-DCE; 289 unreachable fns in main, ~315 in tests) |
-| Cyrius pin | 6.2.24 |
+| Current version | **0.5.8** — toolchain 6.5.35 + taar 0.5.0 dep bump (0.5.7: AGNOS kernel-leased DNS; 0.5.5: IPv4 codec folded onto taar) |
+| Status | **Linux MVP at full POSIX-ping output parity for v4 + v6** — `yo dns.google` (A default), `yo -6 dns.google` (AAAA), `yo ::1` (ip6.arpa PTR → `(localhost)`), `yo fe80::<self>%enp1s0` (link-local via scope id), `yo ::ffff:127.0.0.1` (v4-mapped routed through ICMPv4). AGNOS backend now gated on **one** narrow item — exposing the kernel's existing `icmp_ping` (plus UDP + ifindex) as ring-3 syscalls (see § AGNOS blocker). The Cyrius agnos *target itself already works*, and its `args.cyr` gate closed at cyrius 6.0.87/6.1.32. 0.5.x band closed. |
+| Build size | ~145 KB (148,120 B) pre-DCE; 400 unreachable fns in main. Grew from ~117 KB with the refreshed stdlib snapshot + taar's 979-line bundle — all DCE-eligible (`CYRIUS_DCE=1`), none reachable |
+| Cyrius pin | 6.5.35 |
 | Tests | 365 assertions in `tests/yo.tcyr` — adds IPv4-embedded parsing, scope-id parsing (`ipv6_parse_ex`), v4-mapped output formatter, `platform_resolve_ifindex` against `/sys/class/net/lo` |
 | Iron-validation host | archaemenid (Beelink SER, AMD) — same machine as the agnosticos iron-burn surface |
 | Family position | First entry in network-tools family |
@@ -94,29 +94,47 @@
 
 The two **narrow, real** gates, both grounded in code:
 
-1. **`cyrius/lib/args.cyr` has no agnos branch.** It only has `#ifdef CYRIUS_TARGET_MACOS` + `#ifdef CYRIUS_TARGET_LINUX` (args.cyr:15,19); the Linux path recovers argv from `/proc/self/cmdline` (args.cyr:52). agnos has no `/proc`, so on an agnos build `argc()/argv()` have no impl → yo sees zero args. Fix: a `CYRIUS_TARGET_AGNOS` branch that reads argc/argv off the **stack at entry** per the agnos process ABI (header sketch at args.cyr:6-8). This is a **Cyrius stdlib fix** — it unblocks every sovereign userland binary, not just yo.
+1. **~~`cyrius/lib/args.cyr` has no agnos branch.~~ CLOSED — verified 2026-08-26 against the vendored source at pin 6.5.35.** `lib/args.cyr:99` now reads `#ifdef CYRIUS_TARGET_AGNOS` → `include "lib/args_agnos.cyr"`, which recovers argc/argv from the SysV init stack the agnos kernel builds at exec (`elf_load_from_file`): cycc emits `mov r15, rsp` as the first runtime instruction on the agnos target and reserves r15 from regalloc, so the init `rsp` survives to the readers. Landed cyrius 6.0.87 (getenv/envp) + 6.1.32 (the r15 landing park, replacing the 6.1.14 scheme that captured *after* gvar-init and so read `argc == 0`). Its `cyrius.lock` hash is **unchanged** by the 6.5.35 bump — it was already present under the 6.2.24 pin, so this entry was stale for several releases rather than newly outdated. Kept visible rather than deleted because two prior refreshes asserted it as open.
 2. **`icmp_ping` is not yet a ring-3 syscall.** It has only in-kernel callers (`agnos/kernel/core/selftests.cyr:112`, in-kernel `shell.cyr:989`); nothing in `agnos/kernel/core/syscall.cyr` exposes it. agnos must promote ICMP — plus UDP (DNS) and an ifindex lookup — into its sovereign ABI. The *logic* exists, so this is plumbing, not algorithm.
 
 Pending later:
-- **AGNOS backend** (`src/platform_agnos.cyr`) — gated on the two narrow items above (an `args.cyr` agnos branch + ICMP/UDP/ifindex ring-3 syscalls), NOT on iron, the kernel ICMP algorithm, or a missing Cyrius target. Slots in as a sibling to `platform_linux.cyr` with no changes to `probe.cyr`. Will also need the sovereign UDP surface for the AGNOS-side `dns_resolve`.
+- **AGNOS backend** (`src/platform_agnos.cyr`) — gated on the *one* remaining item above (ICMP/UDP/ifindex ring-3 syscalls), NOT on iron, the kernel ICMP algorithm, a missing Cyrius target, or argv (that gate closed). Slots in as a sibling to `platform_linux.cyr` with no changes to `probe.cyr`. Will also need the sovereign UDP surface for the AGNOS-side `dns_resolve`.
 - **`taar` substrate extraction** — waits for `dig` to grow into a real second consumer.
 
-## Dependencies (current — `cyrius.cyml [deps].stdlib`)
+## Dependencies (current)
+
+**stdlib** (`cyrius.cyml [deps].stdlib`, 11 leaves — unchanged since the CLI landed):
 
 ```
 string fmt alloc io vec str syscalls assert bench args flags
 ```
 
-`args` + `flags` added when CLI landed. 0.4.0 (DNS) added no stdlib deps — the resolver is built directly on `platform_udp_*` and ipv4_parse, keeping the dep list lean. Will grow further:
+`args` + `flags` arrived with the CLI. DNS (0.4.0) and IPv6 (0.5.x) added none — the
+resolver and the v6 framing are built directly on `platform_*` and stay in-tree.
+`cyrius deps` vendors these into the gitignored `lib/`, hash-locked in `cyrius.lock`
+(27 files at the 6.5.35 pin).
 
-- **0.5.x**: IPv6 framing helpers — likely no new stdlib needs, all in-tree.
-- **0.6.x**: `taar` extraction moves network primitives OUT of `yo`'s vendored stdlib INTO a sibling repo. `cyrius.cyml [deps]` gains `taar = { path = "../taar" }` or registry equivalent.
+**taar** (`cyrius.cyml [deps.taar]`) — **0.5.0**, `modules = ["dist/taar.cyr"]`.
+`path = "../taar"` resolves local dev; `git` + `tag` is the published fallback. yo
+consumes **one symbol**, `ipv4_parse`; the bundle's `socket`/`dns` modules ride along
+and DCE out. The 0.6.x plan below is **done** — the extraction landed at 0.5.5.
 
-## Sibling repos (planned, not yet scaffolded)
+## Family (all three consumers now real)
 
-- **whirl** — curl / wget equivalent. Triggers `taar` extraction when it arrives.
-- **dig** — DNS resolver. Also triggers `taar` extraction if it arrives first.
-- **taar** — substrate library (network-probe primitives). Per [[project_tools_stable_ideas]] memory: real lib from cycle open given three named consumers in the brainstorm window.
+The substrate and both siblings exist; none of this is "planned" any more.
+
+| Repo | Version | Cyrius pin | taar | Relationship |
+|---|---|---|---|---|
+| **taar** | 0.5.0 | 6.5.35 | — | Substrate. yo folded `src/ipv4.cyr` onto it at 0.5.5. |
+| **dig** | 0.3.5 | 6.2.24 | 0.3.1 | DNS resolver. Second `ipv4` consumer — it forced the extraction. |
+| **whirl** | 0.6.4 | 6.4.25 | 0.3.1 | curl/wget. Third consumer; uses taar's `socket` + `dns`, which yo does not. |
+
+**Family drift**: as of 2026-08-26 yo is the *first* of the three to reach 6.5.35 and
+taar 0.5.0 — `dig` and `whirl` still pin 6.2.24 / 6.4.25 and taar 0.3.1. That is fine
+(taar's `ipv4_*` surface is stable across 0.3.1 → 0.5.0), but it means yo is the
+canary: the migration evidence gathered here — zero stdlib removals or arity changes
+across 6.2.24 → 6.5.35 for these 11 modules — applies to them too when they follow.
+`whirl` carries the larger risk, since it pulls the crypto/TLS leaves yo does not.
 
 ## Kernel coupling (AGNOS backend only)
 
@@ -144,7 +162,6 @@ The AGNOS shape can match this 1:1, OR the kernel can offer the more focused `ic
 
 | Item | Blocked on | Owning repo |
 |---|---|---|
-| `args.cyr` agnos branch | stack-walk argc/argv impl under `#ifdef CYRIUS_TARGET_AGNOS` (no `/proc` on agnos) | cyrius |
 | Ring-3 ICMP/UDP/ifindex syscalls | promoting existing `icmp_ping` + net primitives into the agnos sovereign ABI | agnos |
 | `taar` substrate extraction | Second consumer (`whirl` or `dig`) arriving | yo + sibling repos |
 | LAN-on-iron validation | the two gates above + `src/platform_agnos.cyr` (iron RX already proven) | agnos + yo |
@@ -157,8 +174,8 @@ None yet. yo IS a leaf consumer of the kernel; nothing depends on yo today.
 ## Cross-references
 
 - [`roadmap.md`](roadmap.md) — milestone plan through v1.0
-- `cyrius/lib/args.cyr` + `cyrius/lib/syscalls_x86_64_agnos.cyr` — the agnos userland stdlib surface (gate #1 lives in args.cyr)
+- `cyrius/lib/args.cyr:99` + `cyrius/lib/args_agnos.cyr` + `cyrius/lib/syscalls_x86_64_agnos.cyr` — the agnos userland stdlib surface (the old gate #1 lived in args.cyr and is now closed; `syscalls_x86_64_agnos.cyr:1190` also now offers `sys_net_dns_server()`, which supersedes yo's interim raw `syscall(61, 3)` at `src/platform_agnos.cyr:134`)
 - `agnos/kernel/core/net_icmp.cyr` (`icmp_ping`) + `agnos/kernel/core/syscall.cyr` — the kernel ICMP logic + where gate #2 (ring-3 syscall) lands
 - [agnosticos shared-crates.md § yo + taar](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/shared-crates.md) — substrate plan
 
-> **Doc hygiene note (2026-06-03):** the AGNOS-blocker status above was verified against live cyrius + agnos *source*, NOT agnos's own state.md (which lagged — it still described the userland target as missing). When refreshing this section, re-check the code, not sibling-repo prose.
+> **Doc hygiene note (updated 2026-08-26):** the AGNOS-blocker status above is verified against live cyrius + agnos *source*, NOT sibling-repo state.md prose (which lags). The 2026-08-26 pass caught this file's *own* prose lagging the same way: gate #1 had been closed in `cyrius/lib/args.cyr` for several releases while two refreshes here kept restating it as open. Re-check the code — including the claims in this file — not the prose.
