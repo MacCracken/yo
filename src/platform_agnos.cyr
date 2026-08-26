@@ -128,10 +128,15 @@ fn platform_read_file(path, buf, maxlen): i64 {
 # leased gateway), packed first-octet-high-byte; 0 if unconfigured. _dns_choose_
 # nameserver prefers this over /etc/resolv.conf + the off-subnet 1.1.1.1 fallback:
 # the leased resolver is on-subnet, so it routes without depending on gateway-MAC
-# egress — the QEMU-passed / iron-failed gap for `yo google.com`. Raw syscall #61
-# by design (cyrius is hands-off; a future `sys_net_config` wrapper replaces this —
-# see cyrius issue 2026-06-23-agnos-net-config-syscall-wrapper).
-fn platform_dns_server(): i64 { return syscall(61, 3); }
+# egress — the QEMU-passed / iron-failed gap for `yo google.com`.
+#
+# 0.5.7 shipped this as a raw `syscall(61, 3)` because cyrius had no wrapper
+# (issue 2026-06-23-agnos-net-config-syscall-wrapper). 6.5.35 ships one, so the
+# literal is gone — the last raw syscall number in yo's AGNOS backend. The agnos
+# syscall lib spells out why that matters: #61 is net_config on AGNOS but
+# wait4(2) on Linux. The #ifdef kept us safe, but a number that means two
+# different things on two kernels does not belong in a source file.
+fn platform_dns_server(): i64 { return sys_net_dns_server(); }
 
 fn platform_now_us(): i64 { return sys_uptime_ms() * 1000; }
 

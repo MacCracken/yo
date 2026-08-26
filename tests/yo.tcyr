@@ -1026,4 +1026,8 @@ fn main() {
 }
 
 var exit_code = main();
-syscall(60, exit_code);
+# Clamp before exiting: assert_summary() returns the raw failure COUNT, and a
+# wait status is only 8 bits — an unclamped 256 / 512 / 768 failures would exit
+# 0 and score PASS. Any failure at all is exit 1.
+if (exit_code > 0) { exit_code = 1; }
+sys_exit_group(exit_code);

@@ -20,4 +20,8 @@ fn main(): i64 {
 }
 
 var r = main();
-syscall(60, r);
+# Clamp before exiting: a wait status is only 8 bits, so any exit code that is
+# a multiple of 256 truncates to 0 and would score PASS. Any failure at all is
+# exit 1.
+if (r > 0) { r = 1; }
+sys_exit_group(r);

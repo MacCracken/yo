@@ -4,6 +4,91 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.10] — 2026-08-26 (toolchain 6.5.35; taar 0.5.0)
+
+Readability/robustness only — **no behaviour change**, no probe path touched.
+
+### Changed
+- **AGNOS `platform_dns_server` now calls `sys_net_dns_server()`** instead of the raw
+  `syscall(61, 3)` it shipped as in 0.5.7 (`src/platform_agnos.cyr:139`). 0.5.7 labelled
+  that literal "Interim" for exactly this reason: cyrius had no wrapper, so the number
+  went in bare and the entry promised to retire it once one existed. The 6.5.35 vendored
+  stdlib ships it — `lib/syscalls_x86_64_agnos.cyr:1190`, with `SYS_NET_CONFIG = 61`
+  at :361 and the field-0/1/2 peers `sys_net_ip` / `sys_net_netmask` / `sys_net_gateway`.
+  The stdlib's own comment states the stake plainly: **#61 is `net_config` on AGNOS but
+  `wait4(2)` on Linux.** The `#ifdef CYRIUS_TARGET_AGNOS` arm kept that safe, but a
+  number meaning two different things on two kernels does not belong in a source file.
+  This retires the last raw syscall number in yo's AGNOS backend.
+
+  Follows the precedent the substrate lib already set (`taar/src/socket.cyr:396`), whose
+  comment records the same swap for the same reason at the same pin. Deliberately held
+  out of 0.5.8, which was kept a pure toolchain/dep bump with zero source edits per the
+  one-change-at-a-time rule; this is that change, on its own.
+
+### Notes
+- Host **and** `--agnos` build clean; **365/365 tests** green, unchanged from 0.5.9.
+- The two spellings are semantically identical — `sys_net_dns_server()` is defined as
+  `syscall(SYS_NET_CONFIG, 3)`. The emitted `--agnos` binary is *not* byte-identical,
+  because the wrapper is a real call rather than an inlined literal and pulls its three
+  `net_config` peers into the reachable set (421 unreachable fns, was 420). That is a
+  codegen difference, not a behavioural one.
+- The swapped line sits inside the AGNOS `#ifdef`, so the host build does not exercise
+  it and `cyrius test` cannot cover it — `cyrius build --agnos` is the only gate that
+  proves this change, and it is clean. Unchanged from 0.5.7, the AGNOS backend still has
+  no runtime validation: the ring-3 `icmp_ping` syscall gate is open, so nothing here has
+  been *run* on agnos, only compiled for it.
+
+## [0.5.9] — 2026-08-26
+
+Soundness fix to the **test gate** itself, plus the exit-syscall portability that
+came with it. No change to probe behaviour; yo's `0` / `1` / `2` exit contract is
+byte-for-byte what it was.
+
+### Fixed
+- **Test entry points exited with the raw assertion-failure COUNT, so a failing suite
+  could score PASS.** `assert_summary()` returns `_assert_fail` — the failure count,
+  not a boolean (`lib/assert.cyr:186`, `return _assert_fail;`). A process wait status
+  is only 8 bits, so exactly **256 / 512 / 768** failures truncate to exit **0** and the
+  runner reports green over a broken suite. yo has 365 assertions (46 `assert` +
+  299 `assert_eq` sites, many inside loops), so 256 concurrent failures is reachable,
+  not theoretical. All three entry points now clamp any non-zero return to 1 before
+  exiting — the shape `cyrius init` already generates
+  (`cyrius/programs/cyrius-init-templates/proj-tcyr:12-17`):
+  `tests/yo.tcyr`, `tests/yo.bcyr`, `tests/yo.fcyr`.
+
+  Demonstrated both directions by injecting exactly 256 failing assertions into
+  `tests/yo.tcyr`: with the old bare `syscall(60, exit_code)` the runner printed
+  `365 passed, 256 failed` and then scored **`1 passed, 0 failed`, exit 0**; with the
+  clamp it scores **`0 passed, 1 failed`, exit 1**. The probe was removed afterward —
+  the shipped suite is unchanged at 365 assertions.
+
+### Changed
+- **Retired the hardcoded `syscall(60, …)` / `syscall(SYS_EXIT, …)` exits in favour of
+  `sys_exit_group(…)`.** Two reasons, one per half of the swap:
+  - *Portability.* The literal `60` is x86_64-only — exit is **93** on aarch64 and
+    differs again on agnos. `sys_exit_group` is present on every peer yo targets:
+    `lib/syscalls_linux_common.cyr:176`, `lib/syscalls_x86_64_agnos.cyr:471`,
+    `lib/syscalls_windows.cyr:136`. Same class of bug as the v5.4.11 aarch64 syscall
+    split that this stdlib already carries a warning about.
+  - *Correctness.* `sys_exit` is `exit(2)`, which ends only the **calling thread**;
+    `exit_group(2)` ends the **process**. Single-threaded today, but the wrong one of
+    the two is a latent hang, not a style preference.
+
+  Applied to the three test entry points above and to the two source exits —
+  `src/main.cyr:199` and `src/test.cyr:12`. **No clamp on `src/main.cyr`**: its
+  `0` (reply) / `1` (no reply) / `2` (error) are the documented POSIX-ping exit
+  contract, all well under 256, and clamping them would flatten a real distinction.
+
+### Notes
+- `cyrius test` **365/365, exit 0**; a deliberately broken assertion now reports
+  `FAIL` and exits **1**. Host **and** `--agnos` builds clean. `cyrius bench` and
+  `cyrius fuzz` both compile and run green (exit 0) with the new epilogue.
+- Exit contract re-verified against the built binary, not just the source:
+  `yo -c 1 127.0.0.1` → 0, `yo -c 1 ::1` → 0, `yo -c 1 192.0.2.1` (timeout) → 1,
+  `yo -c 1 <unresolvable>` → 2.
+- Held out of **0.5.8** deliberately — that release was a pure toolchain/dep bump with
+  zero source edits, per CLAUDE.md's "ONE change at a time" rule.
+
 ## [0.5.8] — 2026-08-26 (toolchain 6.5.35; taar 0.5.0)
 
 Pure toolchain + dependency bump — **no source edits, no behaviour change**.
