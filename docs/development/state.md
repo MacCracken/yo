@@ -174,7 +174,7 @@ None yet. yo IS a leaf consumer of the kernel; nothing depends on yo today.
 ## Cross-references
 
 - [`roadmap.md`](roadmap.md) — milestone plan through v1.0
-- `cyrius/lib/args.cyr:99` + `cyrius/lib/args_agnos.cyr` + `cyrius/lib/syscalls_x86_64_agnos.cyr` — the agnos userland stdlib surface (the old gate #1 lived in args.cyr and is now closed; `syscalls_x86_64_agnos.cyr:1190` also now offers `sys_net_dns_server()`, which supersedes yo's interim raw `syscall(61, 3)` at `src/platform_agnos.cyr:134`)
+- `cyrius/lib/args.cyr:99` + `cyrius/lib/args_agnos.cyr` + `cyrius/lib/syscalls_x86_64_agnos.cyr` — the agnos userland stdlib surface (the old gate #1 lived in args.cyr and is now closed; `syscalls_x86_64_agnos.cyr:1190` also offers `sys_net_dns_server()`, which yo adopted at 0.5.10 — `src/platform_agnos.cyr:139` now calls the wrapper, retiring the interim raw `syscall(61, 3)` that 0.5.7 shipped)
 - `agnos/kernel/core/net_icmp.cyr` (`icmp_ping`) + `agnos/kernel/core/syscall.cyr` — the kernel ICMP logic + where gate #2 (ring-3 syscall) lands
 - [agnosticos shared-crates.md § yo + taar](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/shared-crates.md) — substrate plan
 

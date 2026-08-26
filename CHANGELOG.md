@@ -30,8 +30,8 @@ Readability/robustness only — **no behaviour change**, no probe path touched.
 - The two spellings are semantically identical — `sys_net_dns_server()` is defined as
   `syscall(SYS_NET_CONFIG, 3)`. The emitted `--agnos` binary is *not* byte-identical,
   because the wrapper is a real call rather than an inlined literal and pulls its three
-  `net_config` peers into the reachable set (421 unreachable fns, was 420). That is a
-  codegen difference, not a behavioural one.
+  `net_config` peer into the reachable set (`--agnos` unreachable fns 421 → 420). That
+  is a codegen difference, not a behavioural one.
 - The swapped line sits inside the AGNOS `#ifdef`, so the host build does not exercise
   it and `cyrius test` cannot cover it — `cyrius build --agnos` is the only gate that
   proves this change, and it is clean. Unchanged from 0.5.7, the AGNOS backend still has
