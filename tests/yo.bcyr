@@ -1,21 +1,88 @@
 # yo benchmarks
 # Stdlib auto-included via cyrius.cyml
 #
-# Pattern: bench_new -> bench_batch_start -> tight loop -> bench_batch_stop -> bench_report.
-# For sub-1us ops use batch_size >= 1000 to amortize clock_gettime overhead
-# (~240 ns per start/stop pair on x86_64 Linux). See lib/bench.cyr header for
-# the full overhead-vs-batching guidance.
+# Pattern: bench_new -> bench_batch_start -> tight loop -> bench_batch_stop ->
+# bench_report. Every row here is a PURE function — no syscalls, no network — so
+# the numbers are stable and comparable across runs. The batch sizes are large
+# because a single clock read on this class of host costs 1.3-1.7 us (measured,
+# not declared — see lib/bench.cyr's header); batching amortises it, and
+# bench_report subtracts the calibrated floor.
+#
+# WHAT IS DELIBERATELY NOT BENCHED HERE. The probe loop itself is dominated by
+# the kernel round-trip and by -i pacing, so timing it in-process would measure
+# the network, not yo. End-to-end parity against iputils-ping is a wall-clock
+# comparison of the whole binary and belongs in a shell, not here:
+#   for i in $(seq 1 100); do build/yo -c 1 -n 127.0.0.1; done
+# Measured 2026-08-26 on archaemenid, best of 3 x 100 runs:
+#   yo             381 us/run
+#   iputils ping   458 us/run
+# i.e. yo is ~17% faster per invocation. See docs/development/roadmap.md
+# § v1.0 criteria.
 
-fn bench_noop(): i64 { return 0; }
+include "src/icmp.cyr"
+include "lib/taar.cyr"
+include "src/ipv6.cyr"
+include "src/stats.cyr"
+include "src/output.cyr"
 
 fn main(): i64 {
     alloc_init();
-    var b = bench_new("noop");
-    bench_batch_start(b);
+
+    # The RFC 1071 inner loop over a default-size probe (8 B header + 56 B
+    # payload). This is the hottest pure path: it runs once per packet built,
+    # and again on the AGNOS backend when _ag_icmp_pong recomputes the
+    # checksum of the synthesised reply.
+    var pkt = alloc(64);
     var i = 0;
-    while (i < 1000000) { bench_noop(); i = i + 1; }
-    bench_batch_stop(b, 1000000);
-    bench_report(b);
+    while (i < 64) { store8(pkt + i, i & 0xFF); i = i + 1; }
+
+    var b1 = bench_new("icmp_checksum 64B");
+    bench_batch_start(b1);
+    i = 0;
+    while (i < 100000) { icmp_checksum(pkt, 64); i = i + 1; }
+    bench_batch_stop(b1, 100000);
+    bench_report(b1);
+
+    # Full echo-request build: header stores + memcpy of the payload + the
+    # checksum pass. One per packet sent.
+    var payload = alloc(56);
+    i = 0;
+    while (i < 56) { store8(payload + i, i & 0xFF); i = i + 1; }
+    var out = alloc(64);
+
+    var b2 = bench_new("icmp_build_echo_request 56B");
+    bench_batch_start(b2);
+    i = 0;
+    while (i < 100000) { icmp_build_echo_request(out, 0x1234, i & 0xFFFF, payload, 56); i = i + 1; }
+    bench_batch_stop(b2, 100000);
+    bench_report(b2);
+
+    # Address parsing — once per target, so not hot, but it is the surface that
+    # takes untrusted input and the one most likely to regress on a refactor.
+    var b3 = bench_new("ipv4_parse dotted-quad");
+    bench_batch_start(b3);
+    i = 0;
+    while (i < 100000) { ipv4_parse("192.168.101.203"); i = i + 1; }
+    bench_batch_stop(b3, 100000);
+    bench_report(b3);
+
+    var v6out = alloc(16);
+    var b4 = bench_new("ipv6_parse compressed");
+    bench_batch_start(b4);
+    i = 0;
+    while (i < 100000) { ipv6_parse("2001:db8::8a2e:370:7334", v6out); i = i + 1; }
+    bench_batch_stop(b4, 100000);
+    bench_report(b4);
+
+    # Banner formatting — once per target line of output.
+    var fbuf = alloc(64);
+    var b5 = bench_new("output_ipv4_to_buf");
+    bench_batch_start(b5);
+    i = 0;
+    while (i < 100000) { output_ipv4_to_buf(0xC0A865CB, fbuf); i = i + 1; }
+    bench_batch_stop(b5, 100000);
+    bench_report(b5);
+
     return 0;
 }
 

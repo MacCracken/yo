@@ -19,4 +19,7 @@ Decisions about yo — what we chose, the context, and the consequences we accep
 
 ## Index
 
-_No ADRs yet. Add the first as `0001-kebab-case-title.md`._
+| ADR | Status | Decision |
+|---|---|---|
+| [0001](0001-per-backend-sovereignty.md) — Per-backend sovereignty | Accepted | Linux uses the host's POSIX socket surface pragmatically; the AGNOS backend uses sovereign kernel syscalls only. Sovereignty is enforced **per backend**, not project-wide. |
+| [0002](0002-focused-kernel-icmp-syscall.md) — Focused kernel ICMP syscall | Accepted | agnos exposes one-shot `icmp_echo(dst) → rtt_ms` rather than a general send/recv surface, and yo adapts to that shape. Costs `-W` and real TTL on that backend. |

@@ -1,12 +1,12 @@
 # yo — Roadmap
 
-> **Status**: Active | **Last Updated**: 2026-05-23 (post 0.5.2 — scope IDs + v4-embedded; 0.5.x band closed)
+> **Status**: Active | **Last Updated**: 2026-08-26 (post 0.5.11 — **§ 0.6.x and § 0.7.x closed**; the AGNOS backend ships, is iron-validated, and now has an automated QEMU gate)
 >
 > Milestone path from scaffold through v1.0 (POSIX-ping feature parity, multi-backend). Per first-party-documentation roadmap shape: **Completed** / **Backlog** / **Future** / **v1.0 criteria**.
 >
 > Volatile state (binary size, test count, current cycle) lives in [`state.md`](state.md). This file is the milestone plan; state.md is the live snapshot.
 >
-> **Big shift**: 2026-05-23 pivot from "agnos-only, blocked on kernel surface" to **multi-backend, Linux first**. AGNOS, Windows, Apple backends slot in later. See [[project-yo-multi-backend-pivot]].
+> **Big shift**: 2026-05-23 pivot from "agnos-only, blocked on kernel surface" to **multi-backend, Linux first**. See [[project-yo-multi-backend-pivot]]. The pivot has since played out in full — the AGNOS backend landed at 0.5.3 and is validated on iron and in QEMU; Windows and Apple remain post-1.0.
 
 ---
 
@@ -23,6 +23,15 @@
 | **0.5.0** | 2026-05-23 | **IPv6 literal probe.** `yo ::1`, `yo 2001:db8::1`, full eight-group form, ULA/loopback all work end-to-end against the Linux AF_INET6 SOCK_DGRAM ICMPv6 path. New `src/ipv6.cyr` parser (RFC 4291, single `::`, case-insensitive, 16 packed bytes network-order). `src/icmp.cyr` adds ICMPV6_ECHO_REQUEST/REPLY + `icmp6_build_echo_request` (kernel fills checksum via `IPV6_CHECKSUM` offset=2). `src/platform_linux.cyr` adds `_lx_sockaddr_in6`, `platform_icmp6_open/_send_to/_recv_ext`, `_lx_cmsg_find_hoplimit`. `probe_run(target, af, addr_arg, ...)` dispatches v4 vs v6 per-target; multi-target invocations can mix families. Deferred to 0.5.1: AAAA lookup, `ip6.arpa` PTR, `-4`/`-6` flags, scope IDs, IPv4-embedded textual form. 252 unit assertions (+65). |
 | **0.5.1** | 2026-05-23 | **IPv6 polish.** AAAA DNS lookup (`dns_resolve_aaaa`, query type 28), `ip6.arpa` PTR reverse-DNS (32 single-nibble labels least-sig-first), `-4` / `-6` family-forcing flags with mutual-exclusion check (`CLI_ERR_AF_CONFLICT`), RFC 5952 canonical v6 banner formatter (`output_ipv6_to_buf` — longest zero-run compressed to `::`, no leading zeros, lowercase). `yo dns.google` defaults to A; `yo -6 dns.google` does AAAA. `yo ::1` banners `(localhost)` via ip6.arpa. Deferred to 0.5.2 or later: scope IDs (`%iface`), IPv4-embedded textual form (`::ffff:1.2.3.4`). 298 unit assertions (+46). |
 | **0.5.2** | 2026-05-23 | **Scope IDs + IPv4-embedded textual form** (closes 0.5.x band). `ipv6_parse_ex` splits the `%zone` suffix; `platform_resolve_ifindex` reads `/sys/class/net/<iface>/ifindex` and the resolved id is written to `sin6_scope_id` (off 24 of sockaddr_in6). `_ipv6_parse_with_v4` accepts the dotted-quad tail (`::ffff:1.2.3.4`, `2001:db8::1.2.3.4`, full no-`::` form) via pre-scan + `<prefix>0:0` synthesis + last-4-byte overwrite. RFC 5952 §5 v4-mapped output formatter. v4-mapped destinations dispatch via the IPv4 socket (ICMPv6 can't carry an ICMPv4 probe). `yo: unknown interface: <name>` exit 2 on bad zone. 365 unit assertions (+67). |
+| **0.5.3** | 2026-06-14 | **AGNOS breakout — yo builds for the sovereign kernel.** `src/platform_agnos.cyr`: the POSIX `socket()` path replaced by ring-3 agnos syscalls. **The ICMP model bridge** — `icmp_echo`(#55) is one-shot (send + wait + RTT in one blocking call), so yo's `open → send_to → recv_ext` surface collapses onto it: `send_to` stores the request, `recv_ext` calls `icmp_echo` then synthesises the reply from the stored request (type 8→0, checksum recomputed via yo's own `icmp_checksum`). DNS rides `udp_bind/send/recv/unbind` (#51-54). `src/platform.cyr` dispatches on `#ifdef CYRIUS_TARGET_AGNOS`. Pin 6.0.51 → 6.2.5. |
+| **0.5.4** | 2026-06-14 | Pin → 6.2.6; dropped the `syscall(40)/(41)` chrono workaround for the `sys_uptime_ms` / `sys_sleep_ms` wrappers. |
+| **0.5.5** | 2026-06-15 | **`taar` fold — the IPv4 codec extracted.** `src/ipv4.cyr` removed; `ipv4_parse` now comes from the shared substrate. This is § 0.8.x, landed early because `dig` became the real second consumer. |
+| **0.5.6** | 2026-06-19 | Pin → 6.2.24; taar → 0.3.0. |
+| **0.5.7** | 2026-06-23 | **AGNOS nameserver prefers the kernel-leased resolver** — `net_config`#61 field 3 via `platform_dns_server`, ahead of `/etc/resolv.conf` and the `1.1.1.1` fallback. Fixes the off-subnet routing gap that froze `yo google.com` on iron. taar → 0.3.1. |
+| **0.5.8** | 2026-08-26 | Pin 6.2.24 → **6.5.35** (three minor bands); taar → **0.5.0**. Verified source-clean up front by diffing cyrius's `api-surface.snapshot`: the stdlib surface yo uses grew 219 → 280 symbols with **zero** removals or arity changes. No source edits. |
+| **0.5.9** | 2026-08-26 | **Test-gate soundness.** `assert_summary()` returns the raw failure COUNT and a wait status is 8 bits, so exactly 256/512/768 failures exited 0 and scored PASS. All three entry points now clamp to 1, and every hardcoded exit syscall moved to `sys_exit_group` (portable across x86_64 / aarch64 / agnos). |
+| **0.5.10** | 2026-08-26 | Retired the last raw syscall number in the AGNOS backend — `syscall(61, 3)` → `sys_net_dns_server()`. (#61 is `net_config` on AGNOS but `wait4(2)` on Linux.) |
+| **0.5.11** | 2026-08-26 | **`--diag` first-fail diagnostics + the AGNOS run gate.** `--diag` dumps per-backend state on 100% loss (Linux: socket flavour, `ping_group_range`, `sendto`/`recv` errno; AGNOS: the `net_config` lease + the `icmp_echo` return). `scripts/agnos-qemu-smoke.sh` boots agnos in QEMU, types a probe at the shell over QMP `send-key`, and asserts on serial — **2/2 replies, 0% loss** against the SLIRP gateway, and correctly **FAILs** against an unreachable one. Closes § 0.6.x and § 0.7.x. |
 
 ---
 
@@ -48,37 +57,78 @@ Everything in this band is achievable on the Linux backend alone — no new plat
 - [x] **AAAA DNS lookup + `-4` / `-6` flags** — landed in 0.5.1. `dns_resolve_aaaa` issues type-28 queries; `-4` / `-6` restrict resolution to one family with `CLI_ERR_AF_CONFLICT` on both. `ip6.arpa` PTR reverse-DNS also in 0.5.1; RFC 5952 canonical formatter for AAAA-resolved banners.
 - [x] **Scope IDs + IPv4-embedded form** — landed in 0.5.2. `ipv6_parse_ex` splits `%zone`; `platform_resolve_ifindex` (Linux: `/sys/class/net/<iface>/ifindex`) maps to sin6_scope_id. `_ipv6_parse_with_v4` accepts `::ffff:1.2.3.4`, `2001:db8::1.2.3.4`, and the full no-`::` form. v4-mapped addresses dispatch through the IPv4 socket because ICMPv6 can't carry an ICMPv4 probe. RFC 5952 §5 v4-mapped output. **0.5.x band closed.**
 
-### 0.6.x — AGNOS backend
+### 0.6.x — AGNOS backend — **CLOSED (0.5.3 … 0.5.11)**
 
-**Trigger**: two narrow gates, both verified against live source 2026-06-03 (see [`state.md` § AGNOS blocker](state.md) for the code-grounded breakdown). The old "blocked on r8169 Attempt 97" trigger is **dead** — iron RX is proven, the kernel ICMP logic already exists (`agnos/kernel/core/net_icmp.cyr` `icmp_ping`), and Cyrius already has a working `CYRIUS_TARGET_AGNOS` emit target. What's actually left:
+**Both gates are closed, and both were closed for a while before this file noticed.**
+Verified against live source 2026-08-26, not against sibling-repo prose:
 
-1. **`cyrius/lib/args.cyr` agnos branch** — only MACOS + LINUX branches exist today; the Linux path reads `/proc/self/cmdline`, which agnos lacks. Needs a `#ifdef CYRIUS_TARGET_AGNOS` branch that stack-walks argc/argv at entry. Cyrius-side fix; unblocks all sovereign userland binaries. (`io.cyr` already works on the agnos target.)
-2. **Ring-3 ICMP/UDP/ifindex syscalls in agnos** — `icmp_ping` exists but has only in-kernel callers; agnos must expose it (+ UDP for DNS, + ifindex) in `agnos/kernel/core/syscall.cyr`. Logic exists; this is plumbing.
+1. ~~`cyrius/lib/args.cyr` agnos branch~~ — **closed at cyrius 6.0.87 / 6.1.32.**
+   `lib/args.cyr:99` dispatches `#ifdef CYRIUS_TARGET_AGNOS` → `lib/args_agnos.cyr`,
+   which recovers argc/argv from the SysV init stack the kernel builds at exec (cycc
+   emits `mov r15, rsp` as the first runtime instruction on that target and reserves
+   r15 from regalloc).
+2. ~~Ring-3 ICMP/UDP/ifindex syscalls in agnos~~ — **closed at agnos 1.45.4.**
+   `icmp_echo`(#55) returns RTT in ms or -1; UDP is #51-54; `net_config` is #61.
+   cyrius ships typed wrappers for all of them.
 
-- [ ] Promote `icmp_ping` (+ UDP send/recv + ifindex) from in-kernel functions to ring-3 syscalls in `agnos/kernel/core/syscall.cyr`. Per [[project_agnos_kernel_growth_rules]] — NOT POSIX `socket()`. The kernel already chose the focused `icmp_ping(dst_ip) → rtt_ticks` shape; `platform_agnos.cyr` collapses `_send_to + _recv` onto it.
-- [ ] `cyrius/lib/args.cyr` agnos branch (stack-walk argc/argv; no `/proc`).
-- [ ] Per-process ICMP listener registration in agnos kernel (analogous to UDP listener table at `net.cyr:142-196`).
-- [ ] QEMU smoke: `qemu-net-icmp-smoke.sh` boots kernel + sends a self-loopback ICMP echo, asserts rtt > 0.
-- [ ] `src/platform_agnos.cyr` in yo, dispatched by `#ifdef CYRIUS_TARGET_AGNOS` in `src/platform.cyr` (the `_LX_*` constants in `platform_linux.cyr` get a sibling `_AG_*` namespace).
-- [ ] `yo`'s `src/icmp.cyr` checksum logic is reused byte-for-byte by the agnos kernel verification path.
+- [x] Promote `icmp_ping` to a ring-3 syscall — agnos 1.45.4, as `icmp_echo`#55. The
+      kernel kept the **focused** shape, so `platform_agnos.cyr` collapses
+      `_send_to + _recv` onto it. See [ADR 0002](../adr/0002-focused-kernel-icmp-syscall.md).
+- [x] `cyrius/lib/args.cyr` agnos branch — cyrius 6.0.87 / 6.1.32.
+- [x] `src/platform_agnos.cyr`, dispatched by `#ifdef CYRIUS_TARGET_AGNOS` in
+      `src/platform.cyr` — landed 0.5.3.
+- [x] QEMU smoke — `scripts/agnos-qemu-smoke.sh` (0.5.11). Boots agnos against an ext2
+      rootfs carrying `/bin/agnsh` + `/bin/yo` and types a probe over QMP `send-key`
+      (agnos has no serial RX; console input is a USB-keyboard read). **2/2 replies,
+      0% loss** against the SLIRP gateway; correctly **FAILs** against an
+      unreachable address. (Such a run also prints `ttl=64`, but that is a literal
+      written by `_ag_icmp_pong` — `icmp_echo`#55 surfaces no reply TTL — so it is
+      not evidence of anything. See [ADR 0002](../adr/0002-focused-kernel-icmp-syscall.md) § 4.)
+- [x] `src/icmp.cyr`'s checksum is shared byte-for-byte with the kernel path — it is
+      modelled on `agnos/kernel/core/net.cyr`, and `_ag_icmp_pong` recomputes the
+      synthesised reply's checksum with yo's own `icmp_checksum`.
+- [ ] ~~Per-process ICMP listener registration in the agnos kernel~~ — **obsolete.**
+      It presupposed a general send/recv surface. `icmp_echo`#55 is one-shot and
+      matches replies inside the kernel, so there is no per-process listener to
+      register. Kept visible rather than deleted because it was a planned item.
 
-### 0.7.x — Iron validation (AGNOS backend)
+### 0.7.x — Iron validation (AGNOS backend) — **CLOSED**
 
-**Trigger**: 0.6.x AGNOS backend lands.
+Validated on archaemenid, recorded in **agnos's** CHANGELOG (yo's own docs missed it
+for four releases):
 
-- [ ] First iron run: `yo 192.168.1.1` on archaemenid (AGNOS-booted). Expected: RTT ≤ 1 ms against the home gateway.
-- [ ] First WAN run from AGNOS: `yo 8.8.8.8`. Expected: 5-30 ms from a US residential connection.
-- [ ] First-fail diagnostics: when 100% loss, dump kernel ICMP send/recv counters via a `--diag` flag (matches `read-boot-log.sh` pattern for r8169 CMOS slots).
+- [x] First iron run + first WAN run — agnos **1.45.16** burn (2026-06-23):
+      `yo google.com` → **2/4, 50% loss**. Root cause was not yo: the RX ring was
+      serviced only while a ring-3 tool sat in its own `net_poll()` loop, so LAN
+      chatter overran the 64-deep ring between commands. Fixed in agnos 1.45.17 by
+      draining RX every 100 Hz tick. Invisible in QEMU, because SLIRP is
+      point-to-point — the burn was the only way to see it.
+- [x] Clean iron run — agnos **1.51.7** burn (2026-07-02): `yo google.com` **4/4 at
+      0% loss**, three RTTs at sub-tick `0.00 ms`, real DHCP lease `192.168.1.195`,
+      `net: L2 OK`, no storm, no hang.
+- [x] First-fail diagnostics — `--diag`, landed 0.5.11. **Note the roadmap asked for
+      "kernel ICMP send/recv counters" and those do not exist**: the agnos kernel keeps
+      no ICMP tx/rx counters and exposes none to ring 3 (`net_config` has exactly four
+      fields and returns -1 for anything else). `--diag` dumps the configuration state
+      that IS reachable — the DHCP lease — plus the raw `icmp_echo` return. Counters
+      remain an agnos-side ask, not a yo one.
 
-### 0.8.x — `taar` substrate extraction
+### 0.8.x — `taar` substrate extraction — **CLOSED (landed early, at 0.5.5)**
 
-**Trigger**: a second consumer (likely `dig`) has working network code that needs the same primitives yo has built inline.
+The trigger fired ahead of schedule: `dig` grew a real DNS resolver and became the
+genuine second consumer, exactly as [[feedback-yo-extract-after-second-consumer]]
+required. The extraction was not pre-built from naming.
 
-Per [[feedback-yo-extract-after-second-consumer]]: don't pre-build the shared lib from naming alone. The current state (`dig` is scaffold-only) is NOT the trigger; the trigger is dig having a real DNS resolver that wants to share the UDP/socket plumbing yo built.
+- [x] Open `~/Repos/taar` — done; yo folded `src/ipv4.cyr` onto it at 0.5.5.
+- [x] `[deps.taar]` in yo's manifest — `path = "../taar"` for local dev, `git`+`tag`
+      published fallback. Currently **taar 0.5.0**.
+- [x] Consume `taar` with no CLI surface change — the extraction was internal. yo uses
+      exactly one taar symbol, `ipv4_parse`; the bundle's `socket`/`dns` modules ride
+      along and DCE out.
 
-- [ ] Open `~/Repos/taar` from yo's `src/platform_linux.cyr` + `src/dns.cyr` + dig's resolver core. Reshape only after both consumers push back on the abstraction.
-- [ ] Add `taar = { path = "../taar" }` to `yo/cyrius.cyml [deps]` and `dig/cyrius.cyml [deps]`.
-- [ ] Bump yo to consume `taar` without CLI surface change. The extraction is internal.
+> **What actually remains before 1.0 is in § v1.0 criteria below** — there is no open
+> backlog band left. The work is docs, an audit pass, and closing the two measurement
+> criteria.
 
 ---
 
@@ -99,18 +149,67 @@ Lower priority. Item shape pinned for orientation; specific versions TBD.
 
 ## v1.0 criteria (release gate)
 
-Ship 1.0 when all of these are true. Pre-1.0 minor cycles can land partial subsets; the v1.0 tag is the all-of-these gate.
+Ship 1.0 when all of these are true. Status re-assessed 2026-08-26 at 0.6.0 against
+the code and against measurements, not against this file's own prior claims.
 
-- [ ] **Feature parity with POSIX `ping`** on the Linux backend: `-c`, `-W`, `-i`, `-s`, `-q`, `-v`, IPv4 + IPv6, DNS resolution, reverse-DNS display, multiple targets, TTL display. (Flood `-f`, timestamp `-D`, bind `-I`, MTU `-M` deferred to post-1.0.)
-- [ ] **AGNOS backend working** end-to-end. `src/platform_agnos.cyr` lands ICMP via the sovereign kernel surface. QEMU smoke + iron validation both green.
-- [ ] **LAN-on-iron validated** on archaemenid against the home gateway (`192.168.1.1`) and at least one WAN host (`8.8.8.8`), AGNOS-booted.
-- [ ] **No POSIX `socket()` in the AGNOS backend** (`src/platform_agnos.cyr`). Sovereign kernel primitives only on that path. Linux backend keeps using POSIX socket() pragmatically per the per-backend sovereignty rule. Audit pass per [first-party-standards § Security Hardening](https://github.com/MacCracken/agnosticos/blob/main/docs/development/first-party/first-party-standards.md#security-hardening-required-before-every-release) covers the AGNOS path only.
-- [ ] **Tests**: ≥ 100 assertions in `tests/yo.tcyr` covering arg parsing, framing, checksum, IPv4 + IPv6 parsing, RTT format, summary computation, error paths. `tests/yo.fcyr` fuzz harness for the response-frame parser. `tests/yo.bcyr` benchmark vs Linux's `iputils-ping` (within 10% wall-clock parity, target binary size ≤ 30 KB after DCE).
-- [ ] **Substrate extraction decision made**: either `taar` lands (with `dig` as the second consumer) OR an ADR explicitly defers it. Don't ship 1.0 with the substrate question unanswered.
-- [ ] **Docs**: ADR for the per-backend sovereignty rule, ADR for the kernel-syscall-shape decision (focused vs general), architecture note for the response-frame parsing invariants, guide for the diagnostic flow when 100% loss happens.
-- [ ] **CI green**: `.github/workflows/{ci,release}.yml` both green on the v1.0 candidate commit. `workflow_call:` reusable invocation pattern in place. Release workflow auto-uploads `build/yo` to the GitHub release.
+- [x] **Feature parity with POSIX `ping`** on the Linux backend: `-c`, `-W`, `-i`,
+      `-s`, `-q`, `-v`, IPv4 + IPv6, DNS resolution, reverse-DNS display, multiple
+      targets, TTL display. Plus `-n`, `-4`/`-6` and `--diag`, which POSIX ping has no
+      equivalent of. (Flood `-f`, timestamp `-D`, bind `-I`, MTU `-M` remain post-1.0.)
+- [x] **AGNOS backend working** end-to-end. `src/platform_agnos.cyr` reaches ICMP
+      through the sovereign kernel surface. QEMU smoke green
+      (`scripts/agnos-qemu-smoke.sh`) and iron validation green (agnos 1.51.7 burn).
+- [x] **LAN-on-iron validated** on archaemenid, AGNOS-booted — `yo google.com` 4/4 at
+      0% loss on the 1.51.7 burn, over a real DHCP lease. **Caveat kept deliberately:
+      that burn probed a WAN host by name; a `yo 192.168.1.1` gateway-literal run is
+      not separately recorded.** Not re-opening the band for it, but it is the one
+      line of the original criterion without its own evidence.
+- [x] **No POSIX `socket()` in the AGNOS backend.** `src/platform_agnos.cyr` contains
+      no socket call and, since 0.5.10, no raw syscall numbers either — everything
+      goes through named cyrius wrappers. Formalised in
+      [ADR 0001](../adr/0001-per-backend-sovereignty.md).
+- [x] **Tests**: ≥ 100 assertions — **373** in `tests/yo.tcyr`, covering arg parsing,
+      framing, checksum, IPv4 + IPv6 parsing, RTT format, summary computation and
+      error paths. `tests/yo.fcyr` and `tests/yo.bcyr` both build and run green. The
+      gate itself is sound as of 0.5.9 (exit codes clamped).
+- [x] **Substrate extraction decision made** — `taar` landed at 0.5.5 with `dig` as
+      the genuine second consumer. No ADR deferral needed; the question is answered.
+- [ ] **Docs**: ADR for per-backend sovereignty ✅ (0001), ADR for the kernel-syscall
+      shape ✅ (0002), architecture note on reply-acceptance invariants ✅ (001), guide
+      for the 100%-loss diagnostic flow ✅. *Remaining*: a `README.md` pass, since it
+      predates the AGNOS backend shipping.
+- [x] **CI green on the v1.0 candidate.** `ci.yml` / `release.yml` both green, and as
+      of 0.6.0 CI also runs **`cyrius build --agnos`**, `cyrius bench` and
+      `cyrius fuzz`. The `--agnos` step closed the real gap: `src/platform.cyr`
+      dispatches on `#ifdef`, so the host build never compiles
+      `src/platform_agnos.cyr` and `cyrius test` cannot reach it either — a break in
+      the AGNOS arm used to land green. *Still manual:*
+      `scripts/agnos-qemu-smoke.sh`, which needs sibling checkouts + QEMU + OVMF a
+      GitHub runner does not have. It is deliberately not wired in, because it would
+      SKIP on every run and read as coverage that does not exist.
 
----
+### Two criteria that were re-based (they were unmeasured guesses)
+
+The original gate read *"benchmark vs Linux's `iputils-ping` (within 10% wall-clock
+parity, target binary size ≤ 30 KB after DCE)"*. Both halves were written before
+anything was measured. Measured on archaemenid 2026-08-26:
+
+| | yo 0.6.0 | iputils `ping` 20250605 | verdict |
+|---|---|---|---|
+| wall clock, `-c 1 -n 127.0.0.1`, best of 3 × 100 | **381 µs/run** | 458 µs/run | yo ~17% **faster** — passes, and by more than parity |
+| binary on disk | **152,704 B** | 155,160 B | yo slightly smaller |
+
+- [x] **Wall-clock parity** — met, and exceeded.
+- [ ] **Binary size ≤ 30 KB after DCE — WITHDRAWN AS WRITTEN, needs a new number.**
+      The premise is false: `CYRIUS_DCE=1` **NOPs** unreachable functions, it does not
+      strip them. The file is byte-for-byte the same size with and without it
+      (152,704 B either way; 400 unreachable fns / 68,740 bytes NOPed). So "≤ 30 KB
+      after DCE" is not a target yo can hit by any flag it controls — it is a request
+      for a linker/GC pass cyrius does not have. Roughly 144 KB of the binary is
+      `.text`, most of it the vendored stdlib plus taar's 979-line bundle riding along
+      unreferenced. **Decide before 1.0**: either file the section-GC ask against
+      cyrius, or re-state the criterion as "no larger than the system `ping`" — which
+      yo already satisfies. Do not silently drop it.
 
 ## Out of scope (for v1.0)
 
@@ -128,8 +227,8 @@ Deliberate exclusions — keeps future contributors from adding to v1.0 by accid
 
 - **Pivot memory**: [[project-yo-multi-backend-pivot]] — the 2026-05-23 multi-backend pivot and its rationale.
 - **Extraction memory**: [[feedback-yo-extract-after-second-consumer]] — don't pre-build shared libs from naming alone.
-- **Substrate (planned)**: [taar](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/shared-crates.md) — extracts when dig has working code.
-- **Sibling tools**: [whirl (planned)](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/shared-crates.md), [dig (scaffold only)](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/shared-crates.md).
-- **AGNOS backend gates** (verified against live source 2026-06-03, NOT sibling-repo state docs): `cyrius/lib/args.cyr` agnos branch + ring-3 ICMP/UDP/ifindex syscalls in `agnos/kernel/core/syscall.cyr`. Iron RX is already proven; the old r8169-Attempt-97 dependency is retired.
+- **Substrate**: [taar](https://github.com/MacCracken/taar) — **shipped**, currently 0.5.0. yo folded onto it at 0.5.5 and consumes one symbol, `ipv4_parse`.
+- **Sibling tools**: `whirl` (curl/wget, 0.6.4) and `dig` (DNS, 0.3.5) — both **real and shipping**, not planned. All three share taar. Family drift as of 2026-08-26: yo is on cyrius 6.5.35 / taar 0.5.0 while dig is on 6.2.24 / taar 0.3.1 and whirl on 6.4.25 / taar 0.3.1.
+- **AGNOS backend gates** — **BOTH CLOSED**, verified against live source 2026-08-26: `cyrius/lib/args.cyr:99` has its agnos branch (since cyrius 6.0.87/6.1.32), and `icmp_echo`#55 / UDP #51-54 / `net_config`#61 are ring-3 in `agnos/kernel/core/syscall.cyr` (since agnos 1.45.4). Iron RX was proven long before either. See § 0.6.x.
 - **Kernel-growth posture**: agnos kernel *source* (`net_icmp.cyr`, `syscall.cyr`) + memory [[project_agnos_kernel_growth_rules]]. Do NOT trust agnos's state.md for yo's blocker status — it lagged reality (claimed the userland target was missing when it ships in cyrius today).
 - **Naming lane**: English-wordplay / trickster lane per [[feedback_naming_lanes]] memory. Family: cmdrs, bnrmr, iam, hapi, kii, yo, whirl, dig.

@@ -98,6 +98,16 @@ fn platform_icmp_open(): i64 {
     return fd2;
 }
 
+# Is the privileged SOCK_RAW fallback in play? probe.cyr needs to know, because
+# the kernel does NOT demultiplex a raw socket: it hands us every matching frame
+# on the host, including our own outbound request and other processes' replies.
+# On DGRAM the kernel filters by socket id AND rewrites the ident field, so an
+# ident comparison there would always fail — this must gate that check.
+fn platform_icmp_raw_mode(): i64 {
+    if (_lx_icmp_mode == _LX_ICMP_MODE_RAW) { return 1; }
+    return 0;
+}
+
 fn platform_close(fd): i64 {
     return syscall(_LX_SYS_CLOSE, fd);
 }
@@ -182,6 +192,40 @@ fn _lx_cmsg_find_ttl(control, controllen): i64 {
 # loop runs at human cadence so the cost is irrelevant; keeping the
 # call self-contained means probe.cyr doesn't have to thread a recv
 # context struct.
+# Strip a leading IPv4 header from a SOCK_RAW receive buffer, in place.
+# Returns the new length; returns `n` unchanged when the buffer does not begin
+# with a plausible IPv4 header, so a mis-detection degrades to the old behaviour
+# rather than corrupting the frame.
+#
+# Pure apart from the two buffers it is handed — unit-tested in tests/yo.tcyr
+# (`raw ipv4 header strip`), the same shape as _lx_cmsg_find_ttl.
+#
+# Why this is needed at all: raw(7) says an AF_INET SOCK_RAW socket includes the
+# IP header on every packet RECEIVED. So buf[0] is the version/IHL byte (0x45 for
+# a normal 20-byte header), not the ICMP type — and icmp_type() would return 69,
+# never matching ICMP_ECHO_REPLY. See
+# docs/architecture/001-reply-acceptance-invariants.md.
+#
+# ttl_out: the IP header carries the real TTL at offset 8. Written only when the
+# caller's cmsg walk found none, so an IP_RECVTTL result always wins.
+fn _lx_strip_ipv4_header(buf, n, ttl_out): i64 {
+    if (n < 20) { return n; }
+    var vihl = load8(buf);
+    if ((vihl >> 4) != 4) { return n; }          # not IPv4 — leave it alone
+    var ihl = (vihl & 0x0F) * 4;                 # IHL counts 32-bit words
+    if (ihl < 20) { return n; }                  # malformed: IHL below minimum
+    if (n <= ihl) { return n; }                  # header only, no payload
+    if (ttl_out != 0) {
+        if (load64(ttl_out) == 0) { store64(ttl_out, load8(buf + 8)); }
+    }
+    # Shift the ICMP message down over the IP header. dst < src and the copy runs
+    # forward, so the overlap is safe.
+    var rem = n - ihl;
+    var i = 0;
+    while (i < rem) { store8(buf + i, load8(buf + ihl + i)); i = i + 1; }
+    return rem;
+}
+
 fn platform_icmp_recv_ext(fd, buf, maxlen, ttl_out): i64 {
     var ctlcap = 64;
     var ctl    = alloc(ctlcap);
@@ -202,6 +246,22 @@ fn platform_icmp_recv_ext(fd, buf, maxlen, ttl_out): i64 {
 
     var ctllen = load64(mh + 40);   # kernel writes back actual controllen
     store64(ttl_out, _lx_cmsg_find_ttl(ctl, ctllen));
+
+    # ⛔ SOCK_RAW DELIVERS THE IPv4 HEADER. Per raw(7), an AF_INET SOCK_RAW
+    # socket includes the IP header on every packet RECEIVED (unlike sent, which
+    # is governed by IP_HDRINCL). So buf[0] is the version/IHL byte — 0x45 for a
+    # normal 20-byte header — not the ICMP type. Without this strip,
+    # icmp_type(buf) returns 69, never matches ICMP_ECHO_REPLY (0), and probe.cyr
+    # counts every genuine reply as a loss: the RAW fallback reported 100% loss
+    # against a host that was answering. Reproduced with
+    #   unshare -r -n -- sh -c 'ip link set lo up; yo -c 2 127.0.0.1'
+    # where ping_group_range defaults to '65534 65534' and forces the fallback.
+    # The DGRAM path is unaffected — the kernel strips the header there, which is
+    # why this went unnoticed: DGRAM is what every ordinary run gets.
+    # See docs/architecture/001-reply-acceptance-invariants.md.
+    if (_lx_icmp_mode == _LX_ICMP_MODE_RAW) {
+        return _lx_strip_ipv4_header(buf, n, ttl_out);
+    }
     return n;
 }
 

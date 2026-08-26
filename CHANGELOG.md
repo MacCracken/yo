@@ -4,6 +4,110 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-08-26 — documentation reconciliation, the v1.0-criteria pass, and a SOCK_RAW defect it uncovered
+
+Planned as a docs-and-measurement release. Writing the architecture note found a
+real bug that had shipped since 0.3.0, so it carries that fix too.
+
+### Fixed
+- **The IPv4 `SOCK_RAW` fallback accepted nothing — 100% loss against hosts that
+  were answering.** `raw(7)`: an `AF_INET SOCK_RAW` socket includes the IP header
+  on every packet **received**. yo never stripped it, so `icmp_type(rxbuf)` read
+  the version/IHL byte (`0x45` = 69) instead of the ICMP type, never matched
+  `ICMP_ECHO_REPLY` (0), and every genuine reply was counted as a timeout.
+  Reproduced, and fixed, with:
+
+  ```
+  unshare -r -n -- sh -c 'ip link set lo up; yo -c 3 127.0.0.1'
+  before: 3 sent · 0 received · 100% loss
+  after:  3 sent · 3 received · 0% loss
+  ```
+
+  Four things landed together, because the first and last are only correct as a
+  pair — stripping without looping still loses the probe to yo's *own* outbound
+  request, which a raw socket also receives:
+  1. `_lx_strip_ipv4_header(buf, n, ttl_out)` removes the header in place on the
+     RAW path. It reads `ihl` from the low nibble rather than assuming 20, refuses
+     to strip anything whose version nibble isn't 4 or whose IHL is under the
+     minimum, and lifts the real TTL from header offset 8 when the cmsg walk found
+     none. Pure, and unit-tested.
+  2. `ident` is matched when the RAW fallback is in play, gated on the new
+     `platform_icmp_raw_mode()`. The gate matters: `SOCK_DGRAM` replaces ident with
+     the socket-managed id, so an unconditional check would reject every reply.
+  3. `seq` is matched unconditionally — it survives on every path, and this catches
+     a late reply from probe *n-1* being timed against probe *n*'s `t0`.
+  4. The recv **loops** until a frame matches or the `-W` deadline passes, instead
+     of accepting the first frame. On `SOCK_DGRAM` the first frame matches and the
+     loop exits immediately, so that path is unchanged.
+
+  **Who was affected:** anyone reaching the RAW fallback — `CAP_NET_RAW` plus
+  exclusion from `ping_group_range`. Root on stock Debian/Ubuntu is *not* affected
+  (gid 0 is inside the default `0 0`, so it gets `SOCK_DGRAM`). Containers and
+  fresh network namespaces are, since they default to `65534 65534`. Nothing in the
+  repo records the v4 RAW path ever having been exercised before now — treat it as
+  never-tested rather than as a regression.
+
+  Found by writing [architecture note 001](docs/architecture/001-reply-acceptance-invariants.md),
+  and surfaced by `--diag`: `last recv : no error recorded` was the tell — frames
+  *were* coming back and being rejected after the read.
+
+### Added
+- **[ADR 0001 — Per-backend sovereignty](docs/adr/0001-per-backend-sovereignty.md).**
+  Why Linux uses POSIX pragmatically while AGNOS uses sovereign syscalls only, and
+  where the seam is.
+- **[ADR 0002 — Focused kernel ICMP syscall](docs/adr/0002-focused-kernel-icmp-syscall.md).**
+  Why agnos exposes one-shot `icmp_echo(dst) → rtt_ms` rather than a general
+  send/recv surface, and what that costs: `-W` is inapplicable on AGNOS (the ~3 s
+  bound is fixed inside the kernel), RTT resolution is the 100 Hz tick, and the
+  reported TTL is a literal `64`.
+- **[Architecture note 001 — Reply-acceptance invariants](docs/architecture/001-reply-acceptance-invariants.md).**
+  What yo checks before believing a frame is its reply, and why the answer differs
+  per backend. This is the note that found the bug above.
+- **[Guide — Diagnosing a probe that gets nothing back](docs/guides/diagnosing-no-reply.md).**
+  A decision tree over `--diag` output, per backend, with decoded errnos.
+- **Real benchmarks.** `tests/yo.bcyr` had been a `noop` stub since 0.1.0. It now
+  measures the pure hot paths: `icmp_checksum` 64 B **95 ns**,
+  `icmp_build_echo_request` **197 ns**, `ipv4_parse` **52 ns**, `ipv6_parse`
+  **291 ns**, `output_ipv4_to_buf` **86 ns**.
+- **CI gates the AGNOS arm.** `ci.yml` now runs `cyrius build --agnos` plus
+  `cyrius bench` and `cyrius fuzz`. `src/platform.cyr` dispatches on `#ifdef`, so
+  the host build never compiled `src/platform_agnos.cyr` and `cyrius test` never
+  reached it — a break there used to land green.
+
+### Changed
+- **`docs/development/roadmap.md` reconciled with reality.** § 0.6.x (AGNOS
+  backend), § 0.7.x (iron validation) and § 0.8.x (`taar` extraction) are all
+  **closed** — and had been for some time. Both AGNOS gates closed months ago
+  (`args.cyr` at cyrius 6.0.87/6.1.32; `icmp_echo`#55 at agnos 1.45.4), the backend
+  shipped at 0.5.3, and it was iron-validated on the agnos 1.51.7 burn on
+  2026-07-02. The Completed table gains every release from 0.5.3 to 0.5.11.
+- **`docs/development/state.md` is a snapshot again.** It had accumulated ~80 lines
+  of per-release "carryover" narrative under a heading that says **NOT A LOG** —
+  that history is `CHANGELOG.md`'s job and now lives only there. It also described
+  the AGNOS backend as gated and never-run, which had been false for four releases.
+- **Two v1.0 criteria re-based on measurement** rather than on guesses written
+  before anything was measured:
+  - *Wall-clock parity within 10% of `iputils-ping`* — **met and exceeded**:
+    `-c 1 -n 127.0.0.1`, best of 3 × 100 runs, **yo 381 µs** vs `ping` 458 µs.
+  - *Binary ≤ 30 KB after DCE* — **withdrawn as written.** The premise is false:
+    `CYRIUS_DCE=1` **NOPs** unreachable functions, it does not strip them, so the
+    file is byte-identical either way (152,704 B; 400 fns / 68,740 bytes NOPed).
+    No flag yo controls can reach 30 KB. Either cyrius grows a section-GC pass or
+    the criterion is restated as "no larger than the system `ping`" — which yo
+    already satisfies (155,160 B). Recorded rather than silently dropped.
+
+### Notes
+- **373 → 386 assertions**, +13 for the RAW header strip. Mutation-checked:
+  neutering `_lx_strip_ipv4_header` turns 7 of them red.
+- Host + `--agnos` build clean; `cyrius bench` and `cyrius fuzz` green;
+  `scripts/agnos-qemu-smoke.sh` still PASSes after the probe-loop change.
+- Every runtime path re-verified after the fix: DGRAM v4, DGRAM v6, DNS, `%zone`,
+  v4-mapped, RAW v4 in a namespace, and AGNOS under QEMU.
+- Known latent, unchanged: `--aarch64` builds clean and would be wrong
+  (`platform_linux.cyr` hardcodes x86_64 syscall numbers; the aarch64 peer has no
+  `SYS_SENDTO`). yo ships x86_64 only.
+
+
 ## [0.5.11] — 2026-08-26 — `--diag` first-fail diagnostics + the AGNOS run gate
 
 Two roadmap items: the last unchecked **feature** in § 0.7.x, and the last open

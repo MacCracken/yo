@@ -43,6 +43,16 @@ jobs:
           mkdir -p build
           cyrius build src/main.cyr build/${{ github.event.repository.name }}
 
+      - name: Build (AGNOS target)
+        # ⛔ THIS IS NOT REDUNDANT WITH THE BUILD ABOVE. src/platform.cyr
+        # dispatches on `#ifdef CYRIUS_TARGET_AGNOS`, so the host build compiles
+        # src/platform_linux.cyr and NEVER TOUCHES src/platform_agnos.cyr. Until
+        # this step existed, nothing in CI compiled the AGNOS backend at all and a
+        # break there would have landed green — while the backend is iron-validated
+        # and a headline feature. `cyrius test` cannot cover it either: the test
+        # binary is a host build, so every assertion runs against the Linux arm.
+        run: cyrius build --agnos src/main.cyr build/${{ github.event.repository.name }}-agnos
+
       - name: Test
         # v5.6.28: bare `cyrius test` picks up the [build].test entry
         # AND auto-discovers tests/*.tcyr — avoids the previous
@@ -50,3 +60,18 @@ jobs:
         # stub didn't exist (Issue 1) and also wouldn't ever exercise
         # tests/${proj}.tcyr.
         run: cyrius test
+
+      - name: Bench + fuzz
+        # Both are green and cheap, and both compile module combinations the main
+        # build does not (tests/yo.bcyr pulls icmp + taar + ipv6 + stats + output
+        # together). Cheap insurance against a bit-rotted harness — the bench file
+        # sat as a `noop` stub for six releases without anyone noticing.
+        run: |
+          cyrius bench
+          cyrius fuzz
+
+      # NOTE: scripts/agnos-qemu-smoke.sh is deliberately NOT run here. It needs
+      # sibling checkouts (agnos, gnoboot, agnoshi) plus QEMU + OVMF, which a
+      # GitHub runner does not have — it would SKIP on every run and read as
+      # coverage that does not exist. It stays a manual, local gate; see
+      # docs/development/state.md § Verification.

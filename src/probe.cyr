@@ -83,27 +83,66 @@ fn probe_run(target_cstr, af, addr_arg, scope_id, banner_parens, count, timeout_
             stats_record_loss(s);
             if (quiet == 0) { output_timeout(seq); }
         } else {
+            # Accept an echo reply for our family, SKIPPING frames that are not
+            # one, until the -W deadline.
+            #
+            # ⛔ THE SKIP IS LOAD-BEARING ON SOCK_RAW, NOT DEFENSIVE. A raw ICMP
+            # socket is not demultiplexed by the kernel: it sees every matching
+            # frame on the host, INCLUDING yo's own outbound echo request. On
+            # loopback that request arrives ahead of the reply, and the previous
+            # single-shot recv spent the probe's one read on it — so the real
+            # reply was never read and a live host scored a timeout. Reading until
+            # something matches (or the deadline passes) is what makes the RAW
+            # fallback behave like the DGRAM path, where the kernel already did
+            # this filtering. On DGRAM the first frame matches and the loop exits
+            # immediately, so that path is unchanged.
+            var expected_reply = ICMP_ECHO_REPLY;
+            if (af == 6) { expected_reply = ICMPV6_ECHO_REPLY; }
+            var deadline_us = t0 + timeout_ms * 1000;
             var n = 0;
-            if (af == 6) { n = platform_icmp6_recv_ext(fd, rxbuf, rxcap, ttl_slot); }
-            else         { n = platform_icmp_recv_ext (fd, rxbuf, rxcap, ttl_slot); }
-            var t1 = platform_now_us();
-            if (n < ICMP_HEADER_LEN) {
+            var t1 = t0;
+            var got = 0;
+            var scanning = 1;
+            while (scanning == 1) {
+                if (af == 6) { n = platform_icmp6_recv_ext(fd, rxbuf, rxcap, ttl_slot); }
+                else         { n = platform_icmp_recv_ext (fd, rxbuf, rxcap, ttl_slot); }
+                t1 = platform_now_us();
+                # A short read or a negative return is the timeout / error exit.
+                if (n < ICMP_HEADER_LEN) { scanning = 0; }
+                if (scanning == 1) {
+                    if (icmp_type(rxbuf) == expected_reply) {
+                        # `seq` survives on every path: the kernel rewrites ident
+                        # on SOCK_DGRAM but never seq, and _ag_icmp_pong echoes
+                        # the stored request. Matching it catches a LATE reply
+                        # from probe n-1 arriving during probe n, which would
+                        # otherwise be timed against the wrong t0 and report a
+                        # nonsense RTT.
+                        var is_ours = 1;
+                        if (icmp_seq(rxbuf) != seq) { is_ours = 0; }
+                        # `ident` is only ours on the RAW fallback — SOCK_DGRAM
+                        # replaces it with the socket-managed id, so comparing it
+                        # there would reject every genuine reply.
+                        if (platform_icmp_raw_mode() == 1) {
+                            if (icmp_ident(rxbuf) != ident) { is_ours = 0; }
+                        }
+                        if (is_ours == 1) {
+                            got = 1;
+                            scanning = 0;
+                        }
+                    }
+                    if (scanning == 1) {
+                        # Not ours. Keep reading while -W has budget left.
+                        if (t1 >= deadline_us) { scanning = 0; }
+                    }
+                }
+            }
+            if (got == 1) {
+                var rtt = t1 - t0;
+                stats_record_reply(s, rtt);
+                if (quiet == 0) { output_reply(seq, load64(ttl_slot), rtt); }
+            } else {
                 stats_record_loss(s);
                 if (quiet == 0) { output_timeout(seq); }
-            } else {
-                # Accept any echo reply for our family. SOCK_DGRAM
-                # filters the socket-managed ident on our behalf; on
-                # SOCK_RAW we accept the first matching frame.
-                var expected_reply = ICMP_ECHO_REPLY;
-                if (af == 6) { expected_reply = ICMPV6_ECHO_REPLY; }
-                if (icmp_type(rxbuf) != expected_reply) {
-                    stats_record_loss(s);
-                    if (quiet == 0) { output_timeout(seq); }
-                } else {
-                    var rtt = t1 - t0;
-                    stats_record_reply(s, rtt);
-                    if (quiet == 0) { output_reply(seq, load64(ttl_slot), rtt); }
-                }
             }
         }
 

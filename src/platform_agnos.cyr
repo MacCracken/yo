@@ -155,6 +155,11 @@ fn platform_icmp6_send_to(fd, addr16, scope_id, pkt, pkt_len): i64 { return 0 - 
 fn platform_icmp6_recv_ext(fd, buf, maxlen, hop_out): i64 { return 0 - 1; }
 
 # No interface-index / netlink concept exposed to ring 3 — 0 = unscoped/default.
+# No raw-socket concept on AGNOS — icmp_echo#55 matches the reply in-kernel and
+# _ag_icmp_pong synthesises it locally, so there is never a foreign frame to
+# filter out.
+fn platform_icmp_raw_mode(): i64 { return 0; }
+
 fn platform_resolve_ifindex(name): i64 { return 0; }
 
 # No ring-3 signal/interrupt infra yet — install reports unavailable, check never

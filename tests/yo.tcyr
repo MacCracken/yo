@@ -751,6 +751,69 @@ fn main() {
     cli_parse_argv(reg_nd, 2, av_nd);
     assert_eq(cli_numeric(reg_nd), 0, "numeric off by default");
 
+    # ----- SOCK_RAW: IPv4 header strip -----
+    #
+    # raw(7) delivers the IP header on every RECEIVED packet, so the RAW
+    # fallback saw 0x45 where icmp_type() expects the ICMP type and scored
+    # every live reply as a timeout. These pin the strip and, just as
+    # importantly, pin that it does NOT fire on anything that is not a
+    # plausible IPv4 header — a false strip would corrupt a good frame.
+    test_group("raw ipv4 header strip");
+
+    var rawttl = alloc(8);
+
+    # 20-byte header (IHL=5) + an 8-byte echo reply. TTL=64 at offset 8.
+    var rawpkt[64];
+    var ri = 0;
+    while (ri < 64) { store8(&rawpkt + ri, 0); ri = ri + 1; }
+    store8(&rawpkt,     0x45);          # version 4, IHL 5 -> 20 bytes
+    store8(&rawpkt + 8, 64);            # TTL
+    store8(&rawpkt + 20, ICMP_ECHO_REPLY);
+    store8(&rawpkt + 24, 0x12);         # ident hi
+    store8(&rawpkt + 25, 0x34);         # ident lo
+    store64(rawttl, 0);
+    assert_eq(_lx_strip_ipv4_header(&rawpkt, 28, rawttl), 8, "20B header stripped from 28B frame");
+    assert_eq(icmp_type(&rawpkt), ICMP_ECHO_REPLY, "icmp type readable after strip");
+    assert_eq(icmp_ident(&rawpkt), 0x1234, "ident survives the shift");
+    assert_eq(load64(rawttl), 64, "ttl taken from IP header offset 8");
+
+    # An options-bearing header: IHL=6 -> 24 bytes.
+    var rawopt[64];
+    ri = 0;
+    while (ri < 64) { store8(&rawopt + ri, 0); ri = ri + 1; }
+    store8(&rawopt,      0x46);         # version 4, IHL 6 -> 24 bytes
+    store8(&rawopt + 8,  57);
+    store8(&rawopt + 24, ICMP_ECHO_REPLY);
+    store64(rawttl, 0);
+    assert_eq(_lx_strip_ipv4_header(&rawopt, 32, rawttl), 8, "24B header (IHL=6) stripped");
+    assert_eq(icmp_type(&rawopt), ICMP_ECHO_REPLY, "type readable after IHL=6 strip");
+    assert_eq(load64(rawttl), 57, "ttl read through an options header");
+
+    # A cmsg-supplied TTL must win — the helper only fills an unset slot.
+    store8(&rawopt,      0x45);
+    store8(&rawopt + 8,  99);
+    store8(&rawopt + 20, ICMP_ECHO_REPLY);
+    store64(rawttl, 12);
+    _lx_strip_ipv4_header(&rawopt, 28, rawttl);
+    assert_eq(load64(rawttl), 12, "existing ttl not overwritten by IP header");
+
+    # --- must NOT strip ---
+    var nostrip[64];
+    ri = 0;
+    while (ri < 64) { store8(&nostrip + ri, 0); ri = ri + 1; }
+    store8(&nostrip, ICMP_ECHO_REPLY);
+    assert_eq(_lx_strip_ipv4_header(&nostrip, 8, 0), 8, "no strip when already ICMP (v!=4)");
+
+    store8(&nostrip, 0x45);
+    assert_eq(_lx_strip_ipv4_header(&nostrip, 19, 0), 19, "no strip when shorter than a header");
+    assert_eq(_lx_strip_ipv4_header(&nostrip, 20, 0), 20, "no strip when header-only, no payload");
+
+    store8(&nostrip, 0x43);             # version 4 but IHL 3 -> 12 bytes: malformed
+    assert_eq(_lx_strip_ipv4_header(&nostrip, 28, 0), 28, "no strip when IHL below minimum");
+
+    store8(&nostrip, 0x65);             # version 6 nibble
+    assert_eq(_lx_strip_ipv4_header(&nostrip, 28, 0), 28, "no strip when version nibble is not 4");
+
     # ----- CLI: --diag flag -----
     test_group("cli --diag flag");
 
