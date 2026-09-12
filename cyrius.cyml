@@ -4,7 +4,7 @@ version = "${file:VERSION}"
 description = "yo — Yodel-Out, ICMP echo probe (Cyrius-native sovereign ping)"
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.5.35"
+cyrius = "6.6.2"
 
 [build]
 entry = "src/main.cyr"

@@ -112,9 +112,9 @@ fn main() {
                 if (ipv6_is_v4_mapped(v6buf) == 1) {
                     af = 4;
                     addr_arg = (load8(v6buf + 12) << 24)
-                             | (load8(v6buf + 13) << 16)
-                             | (load8(v6buf + 14) << 8)
-                             |  load8(v6buf + 15);
+                    | (load8(v6buf + 13) << 16)
+                    | (load8(v6buf + 14) << 8)
+                    |  load8(v6buf + 15);
                     if (numeric == 0) {
                         if (dns_reverse_resolve(addr_arg, parens_buf, 256) > 0) {
                             parens = parens_buf;
@@ -174,18 +174,18 @@ fn main() {
         }
 
         var rrc = probe_run(
-            target,
-            af,
-            addr_arg,
-            scope_id,
-            parens,
-            cli_count(reg),
-            cli_timeout_ms(reg),
-            cli_interval_ms(reg),
-            cli_size(reg),
-            cli_quiet(reg),
-            cli_diag(reg)
-        );
+          target,
+          af,
+          addr_arg,
+          scope_id,
+          parens,
+          cli_count(reg),
+          cli_timeout_ms(reg),
+          cli_interval_ms(reg),
+          cli_size(reg),
+          cli_quiet(reg),
+          cli_diag(reg)
+          );
         if (rrc == 0) { any_reply = 1; }
         if (rrc == 2) { any_error = 1; }
         i = i + 1;

@@ -111,9 +111,9 @@ fn output_ipv6_to_buf(addr16, buf): i64 {
         # Bytes 12..15 are the embedded v4. output_ipv4_to_buf takes
         # a packed u32 with the first octet in the high byte; rebuild.
         var packed = (load8(addr16 + 12) << 24)
-                   | (load8(addr16 + 13) << 16)
-                   | (load8(addr16 + 14) << 8)
-                   |  load8(addr16 + 15);
+        | (load8(addr16 + 13) << 16)
+        | (load8(addr16 + 14) << 8)
+        |  load8(addr16 + 15);
         var dq = output_ipv4_to_buf(packed, buf + 7);
         return 7 + dq;
     }

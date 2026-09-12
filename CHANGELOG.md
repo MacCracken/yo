@@ -4,6 +4,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-09-11
+
+### Changed
+
+- **Toolchain `6.5.35` → `6.6.2`.** No source change; the value form needed none.
+  Build, tests, and any bench/fuzz/distlib target the repo ships re-verified at the new pin.
+
+
 ## [0.6.0] — 2026-08-26 — documentation reconciliation, the v1.0-criteria pass, and a SOCK_RAW defect it uncovered
 
 Planned as a docs-and-measurement release. Writing the architecture note found a
