@@ -353,3 +353,20 @@ Deliberate exclusions — keeps future contributors from adding to v1.0 by accid
 - **AGNOS backend gates** — **BOTH CLOSED**, verified against live source 2026-08-26: `cyrius/lib/args.cyr:99` has its agnos branch (since cyrius 6.0.87/6.1.32), and `icmp_echo`#55 / UDP #51-54 / `net_config`#61 are ring-3 in `agnos/kernel/core/syscall.cyr` (since agnos 1.45.4). Iron RX was proven long before either. See § 0.6.x.
 - **Kernel-growth posture**: agnos kernel *source* (`net_icmp.cyr`, `syscall.cyr`) + memory [[project_agnos_kernel_growth_rules]]. Do NOT trust agnos's state.md for yo's blocker status — it lagged reality (claimed the userland target was missing when it ships in cyrius today).
 - **Naming lane**: English-wordplay / trickster lane per [[feedback_naming_lanes]] memory. Family: cmdrs, bnrmr, iam, hapi, kii, yo, whirl, dig.
+
+## Recorded by cyrius 6.7.6 (2026-10-08) — for the next cyrius pin move
+
+⛔ Needs cyrius >= 6.7.6 — nothing to do until cyrius 6.7.6 is tagged; then at your pin bump:
+
+- **Git first: a `path` beside `git` / `tag` becomes a dev override** (here: `taar`).
+  From 6.7.6 it is read only in local mode (`CYRIUS_LOCAL=1`, `CYRIUS_LOCAL=<dep,dep>` or `--local`).
+  With no switch, `cyrius deps` / `build` resolve the TAG (commit pin checked) and print one `hint:`
+  line naming the checkout not used, so a local build and CI compile the same code.
+- Local mode prints a `local:` line per override and builds from `build/local-deps/` without writing
+  `lib/` or `cyrius.lock`; a hand-written `include "lib/<dep>.cyr"` sees the override there too (the
+  compiler's `CYRIUS_LIB_OVERLAY`, set by `cyrius`).
+- The first default resolve adds commit pins for these deps to `cyrius.lock` — a one-time diff.
+- CI lock guards and `sed`-the-path-out steps can become `cyrius deps --locked`.
+- `cyrius.cyml:24-25`'s "`path` drives local dev resolution; `git`+`tag` is the published fallback" holds only
+  with the switch on.
+- Reference: the cyrius guide's *Git first; local development is a switch (6.7.6)*.
