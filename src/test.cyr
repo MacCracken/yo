@@ -4,6 +4,7 @@
 include "lib/syscalls.cyr"
 include "src/icmp.cyr"
 
+# No-op: the assertions live in tests/yo.tcyr, which `cyrius test` runs too.
 fn main() {
     return 0;
 }

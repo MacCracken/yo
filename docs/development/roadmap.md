@@ -1,465 +1,233 @@
 # yo — Roadmap
 
-> **Status**: Active | **Last Updated**: 2026-08-26 (post 0.5.11 — **§ 0.6.x and § 0.7.x closed**; the AGNOS backend ships, is iron-validated, and now has an automated QEMU gate)
+> **Status**: Active | **Last updated**: 2026-11-08 (0.7.2, after the first P(-1) audit)
 >
-> Milestone path from scaffold through v1.0 (POSIX-ping feature parity, multi-backend). Per first-party-documentation roadmap shape: **Completed** / **Backlog** / **Future** / **v1.0 criteria**.
->
-> Volatile state (binary size, test count, current cycle) lives in [`state.md`](state.md). This file is the milestone plan; state.md is the live snapshot.
->
-> **Big shift**: 2026-05-23 pivot from "agnos-only, blocked on kernel surface" to **multi-backend, Linux first**. See [[project-yo-multi-backend-pivot]]. The pivot has since played out in full — the AGNOS backend landed at 0.5.3 and is validated on iron and in QEMU; Windows and Apple remain post-1.0.
+> The plan from here to v1.0, then the trigger-gated backlog after it. Shipped work
+> is not listed: its record is [`CHANGELOG.md`](../../CHANGELOG.md), and the audit
+> that closed 0.7.x is [`docs/audit/2026-11-08-audit.md`](../audit/2026-11-08-audit.md).
+> Volatile state (versions, sizes, test counts) lives in [`state.md`](state.md).
 
 ---
 
-## Completed
+## Where yo stands
 
-| Version | Landed | Items |
-|---|---|---|
-| **0.1.0** | 2026-05-23 | Initial `cyrius init` scaffold. README + CLAUDE.md + LICENSE + CHANGELOG + cyrius.cyml + tests/yo.{tcyr,bcyr,fcyr} + `.github/workflows/{ci,release}.yml`. Stub `main.cyr` prints `hello from yo`. Stdlib vendored in `lib/`. |
-| **0.3.0** | 2026-05-23 | **Linux MVP.** Full CLI (`-c -W -i -s -q -v -h` + long forms) via `lib/flags.cyr`. Strict IPv4 dotted-quad parser. RFC 792 ICMP framing + RFC 1071 checksum. RTT accumulator + README-shaped per-packet/summary output. Linux backend via `src/platform_linux.cyr` (unprivileged SOCK_DGRAM ICMP, falls back to SOCK_RAW). Probe loop with SO_RCVTIMEO. Ctrl-C handling via signalfd. POSIX exit codes (0 / 1 / 2). 87 unit assertions. `workflow_call:` enabled in `ci.yml` so `release.yml` can gate on it. |
-| **0.4.0** | 2026-05-23 | **DNS resolution.** `yo <hostname>` works end-to-end. `src/dns.cyr` — RFC 1035 A-record resolver: QNAME encoder, query builder, response parser (compressed-pointer NAMEs, skips CNAMEs to first A record), `/etc/resolv.conf` line parser, fallback to `1.1.1.1`. UDP primitives + `platform_read_file` added to `platform_linux.cyr`. Banner shows `yo google.com (142.x.y.z)` when DNS was used. NXDOMAIN exits 2 with `yo: cannot resolve host: <name>`. 133 unit assertions (+46). |
-| **0.4.1** | 2026-05-23 | **Reverse DNS.** `yo 8.8.8.8` now banners as `yo 8.8.8.8 (dns.google) — 56 bytes`. `dns_reverse_resolve` issues a PTR query against `D.C.B.A.in-addr.arpa.` with 1 s timeout / 1 attempt. New helpers: `_dns_build_reverse_qname`, `_dns_build_ptr_query`, `_dns_decode_name` (compressed-pointer-aware with 16-jump loop guard), `_dns_parse_ptr_response`. Factored `_dns_walk_to_type` shared by forward+reverse parsers. `-n` / `--numeric` CLI flag suppresses the lookup. 169 unit assertions (+36). |
-| **0.4.2** | 2026-05-23 | **Multiple targets.** `yo router 8.8.8.8 1.1.1.1` runs each target sequentially with its own banner + summary block; non-quiet mode separates them with a blank line. Unresolvable hosts no longer abort — error to stderr, continue to next target. Aggregate exit: `0` if any target had any reply, `2` on resolve/socket error with no replies, `1` otherwise. New accessors: `cli_target_count`, `cli_target_at`. 181 unit assertions (+12). |
-| **0.4.3** | 2026-05-23 | **TTL display.** Per-packet output now shows the response TTL: `seq=0  ttl=57  rtt=5.83 ms`. `IP_RECVTTL` socket option enabled in `platform_icmp_open`; new `platform_icmp_recv_ext(fd, buf, maxlen, ttl_out)` switches to `recvmsg` (syscall 47) and walks the ancillary cmsg chain via the pure helper `_lx_cmsg_find_ttl`. `output_reply` gains a `ttl` parameter — chunk omitted gracefully when 0. Closes the 0.4.x band; next milestone is 0.5.x IPv6. 187 unit assertions (+6). |
-| **0.5.0** | 2026-05-23 | **IPv6 literal probe.** `yo ::1`, `yo 2001:db8::1`, full eight-group form, ULA/loopback all work end-to-end against the Linux AF_INET6 SOCK_DGRAM ICMPv6 path. New `src/ipv6.cyr` parser (RFC 4291, single `::`, case-insensitive, 16 packed bytes network-order). `src/icmp.cyr` adds ICMPV6_ECHO_REQUEST/REPLY + `icmp6_build_echo_request` (kernel fills checksum via `IPV6_CHECKSUM` offset=2). `src/platform_linux.cyr` adds `_lx_sockaddr_in6`, `platform_icmp6_open/_send_to/_recv_ext`, `_lx_cmsg_find_hoplimit`. `probe_run(target, af, addr_arg, ...)` dispatches v4 vs v6 per-target; multi-target invocations can mix families. Deferred to 0.5.1: AAAA lookup, `ip6.arpa` PTR, `-4`/`-6` flags, scope IDs, IPv4-embedded textual form. 252 unit assertions (+65). |
-| **0.5.1** | 2026-05-23 | **IPv6 polish.** AAAA DNS lookup (`dns_resolve_aaaa`, query type 28), `ip6.arpa` PTR reverse-DNS (32 single-nibble labels least-sig-first), `-4` / `-6` family-forcing flags with mutual-exclusion check (`CLI_ERR_AF_CONFLICT`), RFC 5952 canonical v6 banner formatter (`output_ipv6_to_buf` — longest zero-run compressed to `::`, no leading zeros, lowercase). `yo dns.google` defaults to A; `yo -6 dns.google` does AAAA. `yo ::1` banners `(localhost)` via ip6.arpa. Deferred to 0.5.2 or later: scope IDs (`%iface`), IPv4-embedded textual form (`::ffff:1.2.3.4`). 298 unit assertions (+46). |
-| **0.5.2** | 2026-05-23 | **Scope IDs + IPv4-embedded textual form** (closes 0.5.x band). `ipv6_parse_ex` splits the `%zone` suffix; `platform_resolve_ifindex` reads `/sys/class/net/<iface>/ifindex` and the resolved id is written to `sin6_scope_id` (off 24 of sockaddr_in6). `_ipv6_parse_with_v4` accepts the dotted-quad tail (`::ffff:1.2.3.4`, `2001:db8::1.2.3.4`, full no-`::` form) via pre-scan + `<prefix>0:0` synthesis + last-4-byte overwrite. RFC 5952 §5 v4-mapped output formatter. v4-mapped destinations dispatch via the IPv4 socket (ICMPv6 can't carry an ICMPv4 probe). `yo: unknown interface: <name>` exit 2 on bad zone. 365 unit assertions (+67). |
-| **0.5.3** | 2026-06-14 | **AGNOS breakout — yo builds for the sovereign kernel.** `src/platform_agnos.cyr`: the POSIX `socket()` path replaced by ring-3 agnos syscalls. **The ICMP model bridge** — `icmp_echo`(#55) is one-shot (send + wait + RTT in one blocking call), so yo's `open → send_to → recv_ext` surface collapses onto it: `send_to` stores the request, `recv_ext` calls `icmp_echo` then synthesises the reply from the stored request (type 8→0, checksum recomputed via yo's own `icmp_checksum`). DNS rides `udp_bind/send/recv/unbind` (#51-54). `src/platform.cyr` dispatches on `#ifdef CYRIUS_TARGET_AGNOS`. Pin 6.0.51 → 6.2.5. |
-| **0.5.4** | 2026-06-14 | Pin → 6.2.6; dropped the `syscall(40)/(41)` chrono workaround for the `sys_uptime_ms` / `sys_sleep_ms` wrappers. |
-| **0.5.5** | 2026-06-15 | **`taar` fold — the IPv4 codec extracted.** `src/ipv4.cyr` removed; `ipv4_parse` now comes from the shared substrate. This is § 0.8.x, landed early because `dig` became the real second consumer. |
-| **0.5.6** | 2026-06-19 | Pin → 6.2.24; taar → 0.3.0. |
-| **0.5.7** | 2026-06-23 | **AGNOS nameserver prefers the kernel-leased resolver** — `net_config`#61 field 3 via `platform_dns_server`, ahead of `/etc/resolv.conf` and the `1.1.1.1` fallback. Fixes the off-subnet routing gap that froze `yo google.com` on iron. taar → 0.3.1. |
-| **0.5.8** | 2026-08-26 | Pin 6.2.24 → **6.5.35** (three minor bands); taar → **0.5.0**. Verified source-clean up front by diffing cyrius's `api-surface.snapshot`: the stdlib surface yo uses grew 219 → 280 symbols with **zero** removals or arity changes. No source edits. |
-| **0.5.9** | 2026-08-26 | **Test-gate soundness.** `assert_summary()` returns the raw failure COUNT and a wait status is 8 bits, so exactly 256/512/768 failures exited 0 and scored PASS. All three entry points now clamp to 1, and every hardcoded exit syscall moved to `sys_exit_group` (portable across x86_64 / aarch64 / agnos). |
-| **0.5.10** | 2026-08-26 | Retired the last raw syscall number in the AGNOS backend — `syscall(61, 3)` → `sys_net_dns_server()`. (#61 is `net_config` on AGNOS but `wait4(2)` on Linux.) |
-| **0.5.11** | 2026-08-26 | **`--diag` first-fail diagnostics + the AGNOS run gate.** `--diag` dumps per-backend state on 100% loss (Linux: socket flavour, `ping_group_range`, `sendto`/`recv` errno; AGNOS: the `net_config` lease + the `icmp_echo` return). `scripts/agnos-qemu-smoke.sh` boots agnos in QEMU, types a probe at the shell over QMP `send-key`, and asserts on serial — **2/2 replies, 0% loss** against the SLIRP gateway, and correctly **FAILs** against an unreachable one. Closes § 0.6.x and § 0.7.x. |
+Both shipping backends work. Linux covers IPv4 and IPv6 with DNS, reverse DNS,
+scope IDs and multiple targets. AGNOS reaches ICMP through the sovereign kernel
+surface; it is iron-validated (agnos 1.51.7 burn), and the QEMU smoke passes.
+The 0.7.2 P(-1) audit fixed 25 findings. `cyrius audit` is clean and gated in CI,
+every new guard is mutation-checked, a fuzz harness covers every byte parser, and
+an integration harness runs the binary in a network namespace in CI.
+
+What is left before 1.0 is three bands: the AGNOS arm can now use kernel surface it
+has not yet adopted (0.8.x); Linux has portability and resolver gaps (0.9.x); and a
+set of behaviour decisions has to be made, and the surface frozen (0.10.x).
 
 ---
 
-## Backlog — path to v1.0
+## 0.8.x — backend parity
 
-Ordered by dependency. Items further down depend on items earlier.
+Each AGNOS item has its kernel arm and its cyrius wrapper already: the wrappers
+are in the vendored stdlib (`lib/syscalls_x86_64_agnos.cyr`). Nothing here waits
+on another repo.
 
-### DNS + UX polish *(0.4.x)* — **CLOSED**
+- [ ] **Honour `-W` on AGNOS** through `sys_icmp_echo_ex(dst_ip, timeout_ms)`
+      (`icmp_echo_ex`#100, agnos 1.56.48). Today `-W` is silently inapplicable there,
+      because `icmp_echo`#55's bound is a fixed ~3 s. Use the wrapper, never the raw
+      number: agnos's number space overlaps Linux's on purpose.
+- [ ] **ICMP counters in `--diag` on AGNOS**: `sys_net_icmp_tx` / `_rx` /
+      `_replies_sent` / `_timeouts` (`net_config`#61 fields 4..7). `tx > 0, rx == 0`
+      is a network problem; `tx == 0` is a local one. That is the distinction the
+      AGNOS dump cannot make today.
+- [ ] **Ctrl-C on AGNOS** through `sys_sigprocmask` / `sys_signalfd` (#17 / #18).
+      `platform_install_interrupt_watch` is a `-1` stub there; the Linux arm's
+      `platform_wait_readable` / `platform_sleep_interruptible` shape is the model.
+- [ ] **aarch64-correct Linux syscalls.** `src/platform_linux.cyr` still reaches the
+      original socket, file, clock and signal paths by x86_64 number (`_LX_SYS_*`).
+      On aarch64, 44 is `fstatfs(2)`, not `sendto`, so an `--aarch64` build compiles
+      clean and is wrong. Route them through the stdlib `sys_*` wrappers, as the
+      0.7.2 code already does, and add a CI leg that *runs* the binary under
+      `qemu-aarch64`. taar hit this exact defect at its 0.3.3.
+- [ ] **A gateway-literal run on iron** (`yo 192.168.1.1` on an AGNOS-booted box).
+      The 1.51.7 burn probed a WAN host by name; the LAN-literal half of the iron
+      criterion has no evidence of its own.
+- [ ] **AGNOS execution in CI**, if a runner can boot it. The QEMU smoke is a manual
+      gate: it needs the agnos, gnoboot and agnoshi checkouts plus QEMU and OVMF. The
+      CI `--agnos` build only proves the arm compiles. Decide whether a cached
+      kernel image plus `qemu-system-x86_64` on the runner is worth it.
 
-Everything in this band is achievable on the Linux backend alone — no new platform integration needed.
+## 0.9.x — Linux completeness: resolver and diagnostics
 
-- [x] **DNS resolution** (`yo google.com`) — landed in 0.4.0. `src/dns.cyr`: `/etc/resolv.conf` parser, UDP query, RFC 1035 response parse with compressed-pointer + CNAME-skip support. Did NOT trigger `taar` extraction per [[feedback-yo-extract-after-second-consumer]] — still waiting on `dig`.
-- [x] **Stable banner on hostname target** — landed in 0.4.0. `yo google.com` now produces `yo google.com (142.x.y.z) — 56 bytes` and probes normally; NXDOMAIN exits 2 with `yo: cannot resolve host: <name>`.
-- [x] **Reverse DNS lookup** — landed in 0.4.1. PTR query against `D.C.B.A.in-addr.arpa.` with compressed-name decoder; banner shows `yo 8.8.8.8 (dns.google) — 56 bytes` when a PTR exists. `-n` / `--numeric` flag suppresses the lookup.
-- [x] **Multiple targets** (`yo router 8.8.8.8`) — landed in 0.4.2. Sequential per-target probe with own banner + summary; aggregate exit code (`0` any-reply / `2` any-error-no-reply / `1` otherwise). Unresolvable hosts log to stderr and don't abort the run.
-- [x] **TTL / hop-limit display** — landed in 0.4.3. `IP_RECVTTL` enabled on the socket; `recvmsg`-based `platform_icmp_recv_ext` walks the cmsg chain for `(IPPROTO_IP, IP_TTL)`. Per-packet output renders `seq=N  ttl=T  rtt=X.XX ms`; chunk omitted gracefully when the kernel doesn't surface a TTL cmsg.
+- [ ] **IPv6 nameservers in `/etc/resolv.conf`.** They are skipped, and since 0.7.2
+      a file naming only IPv6 servers fails closed rather than falling back to
+      1.1.1.1. That is safe, but on a v6-only network DNS then does not work at
+      all. Needs `ipv6_parse` on the resolv.conf path plus a v6 UDP query socket.
+- [ ] **ICMP error replies.** Destination-unreachable and time-exceeded replies read
+      as timeouts. iputils prints `From <router>: Destination Host Unreachable`, and
+      that line is often the whole diagnosis.
+- [ ] **Answer owner-name / CNAME-chain validation.** yo takes the first A / AAAA /
+      PTR of class IN anywhere in the answer section. glibc checks the owner chain;
+      musl does not. Decide how strict, then implement (taar holds the same item).
+- [ ] **Release artifacts with checksums and a signature.** `release.yml` uploads
+      `build/*` with neither. cyrius's own release pipeline (an Ed25519-signed
+      checksum list) is the pattern.
+- [ ] **Integer flags that wrap.** `lib/flags.cyr` has no overflow check, so
+      `-s 18446744073709551672` parses as 56; yo's range checks only see the
+      wrapped value. Fix it upstream in cyrius, or let the cmdit move (below)
+      settle it, then add the test.
+- [ ] **Adopt cmdit** if the CLI surface work in 0.10.x wants it. See § Appendix:
+      adopting cmdit.
 
-### IPv6 *(0.5.x)* — **CLOSED**
+## 0.10.x — behaviour decisions, then the surface freeze
 
-- [x] **IPv6 colon-hex parser** (`::1`, `2001:db8::1`, full 8-group) — landed in 0.5.0. `src/ipv6.cyr`, 16 packed bytes network-order, single `::` per RFC 4291, case-insensitive. Scope IDs and IPv4-embedded textual form deferred.
-- [x] **ICMPv6 framing** — landed in 0.5.0. Echo Request = type 128, Reply = 129. Kernel fills the checksum on AF_INET6 SOCK_DGRAM when `IPV6_CHECKSUM` is enabled with offset=2 (no pseudo-header math needed in yo).
-- [x] **Platform IPv6 surface** — landed in 0.5.0. `_lx_sockaddr_in6` (28 B), `platform_icmp6_open/_send_to/_recv_ext`, hop-limit cmsg walker. AF_INET6=10, IPPROTO_ICMPV6=58, IPPROTO_IPV6=41.
-- [x] **AAAA DNS lookup + `-4` / `-6` flags** — landed in 0.5.1. `dns_resolve_aaaa` issues type-28 queries; `-4` / `-6` restrict resolution to one family with `CLI_ERR_AF_CONFLICT` on both. `ip6.arpa` PTR reverse-DNS also in 0.5.1; RFC 5952 canonical formatter for AAAA-resolved banners.
-- [x] **Scope IDs + IPv4-embedded form** — landed in 0.5.2. `ipv6_parse_ex` splits `%zone`; `platform_resolve_ifindex` (Linux: `/sys/class/net/<iface>/ifindex`) maps to sin6_scope_id. `_ipv6_parse_with_v4` accepts `::ffff:1.2.3.4`, `2001:db8::1.2.3.4`, and the full no-`::` form. v4-mapped addresses dispatch through the IPv4 socket because ICMPv6 can't carry an ICMPv4 probe. RFC 5952 §5 v4-mapped output. **0.5.x band closed.**
+The audit deferred these because each is a choice about what yo *should* do, not
+a defect. Decide each, implement the decision, then freeze the CLI and output
+format as the 1.0 contract.
 
-### AGNOS backend *(planned as 0.6.x — actually landed 0.5.3 … 0.5.11)* — **CLOSED**
-
-**Both gates are closed, and both were closed for a while before this file noticed.**
-Verified against live source 2026-08-26, not against sibling-repo prose:
-
-1. ~~`cyrius/lib/args.cyr` agnos branch~~ — **closed at cyrius 6.0.87 / 6.1.32.**
-   `lib/args.cyr:99` dispatches `#ifdef CYRIUS_TARGET_AGNOS` → `lib/args_agnos.cyr`,
-   which recovers argc/argv from the SysV init stack the kernel builds at exec (cycc
-   emits `mov r15, rsp` as the first runtime instruction on that target and reserves
-   r15 from regalloc).
-2. ~~Ring-3 ICMP/UDP/ifindex syscalls in agnos~~ — **closed at agnos 1.45.4.**
-   `icmp_echo`(#55) returns RTT in ms or -1; UDP is #51-54; `net_config` is #61.
-   cyrius ships typed wrappers for all of them.
-
-- [x] Promote `icmp_ping` to a ring-3 syscall — agnos 1.45.4, as `icmp_echo`#55. The
-      kernel kept the **focused** shape, so `platform_agnos.cyr` collapses
-      `_send_to + _recv` onto it. See [ADR 0002](../adr/0002-focused-kernel-icmp-syscall.md).
-- [x] `cyrius/lib/args.cyr` agnos branch — cyrius 6.0.87 / 6.1.32.
-- [x] `src/platform_agnos.cyr`, dispatched by `#ifdef CYRIUS_TARGET_AGNOS` in
-      `src/platform.cyr` — landed 0.5.3.
-- [x] QEMU smoke — `scripts/agnos-qemu-smoke.sh` (0.5.11). Boots agnos against an ext2
-      rootfs carrying `/bin/agnsh` + `/bin/yo` and types a probe over QMP `send-key`
-      (agnos has no serial RX; console input is a USB-keyboard read). **2/2 replies,
-      0% loss** against the SLIRP gateway; correctly **FAILs** against an
-      unreachable address. (Such a run also prints `ttl=64`, but that is a literal
-      written by `_ag_icmp_pong` — `icmp_echo`#55 surfaces no reply TTL — so it is
-      not evidence of anything. See [ADR 0002](../adr/0002-focused-kernel-icmp-syscall.md) § 4.)
-- [x] `src/icmp.cyr`'s checksum is shared byte-for-byte with the kernel path — it is
-      modelled on `agnos/kernel/core/net.cyr`, and `_ag_icmp_pong` recomputes the
-      synthesised reply's checksum with yo's own `icmp_checksum`.
-- [ ] ~~Per-process ICMP listener registration in the agnos kernel~~ — **obsolete.**
-      It presupposed a general send/recv surface. `icmp_echo`#55 is one-shot and
-      matches replies inside the kernel, so there is no per-process listener to
-      register. Kept visible rather than deleted because it was a planned item.
-
-### Iron validation *(planned as 0.7.x — landed via agnos burns 1.45.16 / 1.51.7)* — **CLOSED**
-
-Validated on archaemenid, recorded in **agnos's** CHANGELOG (yo's own docs missed it
-for four releases):
-
-- [x] First iron run + first WAN run — agnos **1.45.16** burn (2026-06-23):
-      `yo google.com` → **2/4, 50% loss**. Root cause was not yo: the RX ring was
-      serviced only while a ring-3 tool sat in its own `net_poll()` loop, so LAN
-      chatter overran the 64-deep ring between commands. Fixed in agnos 1.45.17 by
-      draining RX every 100 Hz tick. Invisible in QEMU, because SLIRP is
-      point-to-point — the burn was the only way to see it.
-- [x] Clean iron run — agnos **1.51.7** burn (2026-07-02): `yo google.com` **4/4 at
-      0% loss**, three RTTs at sub-tick `0.00 ms`, real DHCP lease `192.168.1.195`,
-      `net: L2 OK`, no storm, no hang.
-- [x] First-fail diagnostics — `--diag`, landed 0.5.11. **Note the roadmap asked for
-      "kernel ICMP send/recv counters" and those do not exist**: the agnos kernel keeps
-      no ICMP tx/rx counters and exposes none to ring 3 (`net_config` has exactly four
-      fields and returns -1 for anything else). `--diag` dumps the configuration state
-      that IS reachable — the DHCP lease — plus the raw `icmp_echo` return. Counters
-      remain an agnos-side ask, not a yo one.
-
-### `taar` substrate extraction *(planned as 0.8.x — landed early at 0.5.5)* — **CLOSED**
-
-The trigger fired ahead of schedule: `dig` grew a real DNS resolver and became the
-genuine second consumer, exactly as [[feedback-yo-extract-after-second-consumer]]
-required. The extraction was not pre-built from naming.
-
-- [x] Open `~/Repos/taar` — done; yo folded `src/ipv4.cyr` onto it at 0.5.5.
-- [x] `[deps.taar]` in yo's manifest — `path = "../taar"` for local dev, `git`+`tag`
-      published fallback. Currently **taar 0.5.0**.
-- [x] Consume `taar` with no CLI surface change — the extraction was internal. yo uses
-      exactly one taar symbol, `ipv4_parse`; the bundle's `socket`/`dns` modules ride
-      along and DCE out.
-
-> **Every band above is closed.** The bands were named for the version they were
-> expected to land in; three of them landed early, which is why their labels no
-> longer match their release. The open work is § 0.6.x below plus § v1.0 criteria.
-
-### 0.6.x — deferred-work cleanup *(open — this is the current band)*
-
-Collected by a deferred-language sweep of `src/`, `tests/`, `scripts/`, `docs/` and
-the workflow YAML at 0.6.0. Everything here was previously a comment, an aside, or a
-line of prose promising future work; nothing was tracked. Split by who can act.
-
-> ## ⏸ 0.6.1 IS GATED ON A CYRIUS RELEASE
->
-> **agnos 1.56.48 (2026-08-26) closed four of the six kernel asks below** — `#100
-> icmp_echo_ex`, the `net_config` ICMP counters, id+seq reply matching, and the discovery
-> that ring-3 signals already existed. **yo cannot consume any of it yet.**
->
-> The peers exist in the **cyrius working tree** — `SYS_ICMP_ECHO_EX = 100`,
-> `sys_icmp_echo_ex(dst_ip, timeout_ms)`, and `sys_net_icmp_tx` / `_rx` /
-> `_replies_sent` / `_timeouts` — but the newest cyrius **release** is **6.5.35**, which
-> is what `cyrius.cyml` pins and what `cyrius deps` vendors into `lib/`. Until a release
-> carries them, those symbols do not resolve in a yo build.
->
-> ⛔ **Do not work around this by calling the numbers directly.** A raw
-> `syscall(100, ip, ms)` would compile clean and is exactly the bug class agnos's roadmap
-> tracks — the number space deliberately overlaps Linux's, so a raw literal dispatches a
-> different arm on the other backend. The whole point of the wrapper is that the number
-> lives in one place.
->
-> **What unblocks 0.6.1:** a cyrius release **> 6.5.35** containing those wrappers, then
-> `cyrius.cyml` repins and `cyrius deps` re-vendors. **What 0.6.1 then does:**
-> honour `-W` on AGNOS via `sys_icmp_echo_ex`; add the four counters to `--diag`'s AGNOS
-> block, which is what turns "no reply" into "we sent 4 and nothing came back" versus
-> "we never transmitted"; and wire Ctrl-C on AGNOS through `signalfd`#18.
->
-> **Not gated on cyrius**, so available now if 0.6.1 wants them: the aarch64 socket
-> surface, the IPv6-nameserver gap in `resolv.conf`, and the binary-size decision.
-
-**yo-owned — actionable in this repo:**
-
-- [x] **Every raw `write` routed through the stdlib** — done in 0.6.0. The
-      `[cleanup: route this through the stdlib.]` marker had sat in
-      `src/platform_agnos.cyr` since 0.5.3: the AGNOS arm defined a Linux-named
-      `_LX_SYS_WRITE = 1` purely so `probe.cyr`'s error path would resolve there.
-      Fixing it properly meant fixing all of them — `_puts`, `_eputs`, `_emit_lf`,
-      `cli_print_usage`, `_output_puts` and the two single-byte writes were all
-      `syscall(1, ...)`, which hardcodes the **x86_64** write number (it is 64 on
-      aarch64). All now call `sys_write`, which is arch-dispatched, and both
-      `_LX_SYS_WRITE` constants are deleted. Output verified byte-identical.
-- [ ] **IPv6 nameservers in `/etc/resolv.conf` are ignored** (`src/dns.cyr:249`). The
-      parser reads `nameserver <addr>` lines and passes the value to `ipv4_parse`, so a
-      `nameserver fe80::1` or any v6 resolver is silently skipped. On a v6-only network
-      yo falls through to the `1.1.1.1` fallback and DNS appears to work by accident.
-      Needs `ipv6_parse` on that path plus a v6 UDP query socket.
-- [x] **`README.md` reconciled** — done in 0.6.0. It documented `scripts/install.sh`,
-      which does not exist; described the AGNOS backend as "planned"; promised
-      `net_send_raw` primitives that [ADR 0002](../adr/0002-focused-kernel-icmp-syscall.md)
-      rejected; said `taar` "extracts when the second consumer arrives" (it did, at
-      0.5.5); and showed example output with the wrong payload size and no TTL.
-- [ ] **`--aarch64` builds clean and would be wrong.** `src/platform_linux.cyr:22-34`
-      hardcodes x86_64 syscall numbers; the aarch64 stdlib peer has no `SYS_SENDTO`, so
-      `44` would arrive as `fstatfs(2)`. Latent — yo ships x86_64 only — but it blocks
-      any future aarch64 target and a green build must not be read as support. Fix is
-      to route through the arch-dispatched `sys_*` wrappers and add a CI leg that
-      *runs* the binary under `qemu-aarch64`. taar hit this exact defect at its 0.3.3.
-      **Partially reduced in 0.6.0**: every raw `write` now goes through `sys_write`,
-      so the output path is arch-clean. What remains is the socket surface —
-      `_LX_SYS_SOCKET`, `_LX_SYS_SENDTO`, `_LX_SYS_RECVFROM`, `_LX_SYS_RECVMSG`,
-      `_LX_SYS_SETSOCKOPT`, `_LX_SYS_OPEN`, `_LX_SYS_CLOSE`, `_LX_SYS_READ`,
-      `_LX_SYS_NANOSLEEP`, `_LX_SYS_CLOCK_GETTIME`, `_LX_SYS_SIGNALFD4`,
-      `_LX_SYS_RT_SIGPROCMASK`.
-- [ ] **Ctrl-C on AGNOS is a yo-side stub, not a kernel gap.**
-      `platform_install_interrupt_watch` returns `-1` in `src/platform_agnos.cyr`, so a
-      continuous probe cannot be interrupted there. Discovered 2026-08-26: agnos *does*
-      implement `sigprocmask`#17 and `signalfd`#18. The Linux arm uses `signalfd4`(289) +
-      `rt_sigprocmask`(14); the agnos numbers differ, so this needs the cyrius agnos
-      wrappers and a `#ifdef` arm, not new kernel work.
-- [ ] **Decide the binary-size criterion** — see § v1.0 criteria. Either file the
-      section-GC ask against cyrius or restate the gate. Do not let it lapse silently.
-
-**Blocked on agnos — mostly CLOSED in agnos 1.56.48 (2026-08-26):**
-
-Four of the six asks below were resolved kernel-side. What yo does with them is 0.6.1
-work, gated on cyrius shipping the wrappers (they exist in the cyrius tree; a release
-carrying them is what yo can pin).
-
-- [x] **`icmp_echo(dst_ip, timeout_ms)` → minted as `#100 icmp_echo_ex`.** `-W` is
-      honourable on AGNOS. QEMU-proven: a 200 ms deadline against a black hole returned
-      `-1` after **exactly 200 ms**, where the old fixed bound took ~3 s. ⚠ It is a
-      **new syscall number, not a second argument to `#55`** — measured on cyrius 6.5.35,
-      unused syscall argument registers carry stale data rather than zero, so widening a
-      live arm would have handed every shipped one-argument caller a garbage bound.
-- [x] **ICMP tx/rx counters → `net_config`#61 fields 4..7.** `icmp_tx` / `icmp_rx` /
-      `icmp_replies_sent` / `icmp_timeouts`. This is what `--diag` on AGNOS was missing:
-      `tx > 0` with `rx == 0` is a network problem, `tx == 0` is a local one. QEMU-proven
-      self-consistent (`tx = rx + timeouts`).
-- [x] **Reply-match on identifier AND sequence.** The hazard [ADR 0002](../adr/0002-focused-kernel-icmp-syscall.md)
-      filed as *untested, not broken* is now **closed rather than merely untested**:
-      `icmp_id` is a per-kernel constant, so an id-only match let a late reply to a
-      previous ping satisfy whichever wait was open. `net_handle_icmp` now requires seq.
-- [x] **Ring-3 signal infra — it already existed.** `sigprocmask`#17 and `signalfd`#18
-      have kernel arms (`syscall.cyr`). **This was never an agnos gap**;
-      `platform_install_interrupt_watch` returning `-1` on AGNOS is a yo-side stub. Moved
-      to the yo-owned list above — Ctrl-C on AGNOS is our work, not the kernel's.
-- [ ] **An ICMPv6 syscall — now formally backlogged on agnos**, not merely absent.
-      `grep -rliE 'ipv6|0x86DD' agnos/kernel/` returns nothing: no ethertype arm, no
-      128-bit address type, no NDP, no v6 routing. It is a **subsystem, not a syscall**,
-      and NDP *is* ICMPv6, so ICMPv6 is a prerequisite of basic v6 reachability rather
-      than a feature on top. Filed in agnos's `roadmap.md` § OPEN, `unslotted`.
-- [ ] ~~An interface-index lookup~~ — **withdrawn as an ask.** agnos is single-NIC with no
-      index concept, so the syscall would be `return 1` with nothing to scope. `%zone`
-      scope IDs are meaningless until link-local v6 exists, i.e. this is subsumed by the
-      IPv6 item and is not separately useful.
-
-**Blocked on cyrius:**
-
-- [ ] **Section GC / real dead-code stripping.** `CYRIUS_DCE=1` NOPs unreachable
-      functions; it does not remove them, so the binary is byte-identical either way.
-
-**Family hygiene:**
-
-- [ ] **`dig` and `whirl` trail yo's toolchain.** yo is on cyrius 6.5.35 / taar 0.5.0;
-      `dig` is on 6.2.24 / taar 0.3.1 and `whirl` on 6.4.25 / taar 0.3.1. yo's 0.5.8
-      migration evidence (zero stdlib removals across the three-band jump) applies to
-      both; `whirl` carries the larger risk since it pulls the crypto/TLS leaves.
-
----
-
-## Future (post-1.0)
-
-Lower priority. Item shape pinned for orientation; specific versions TBD.
-
-- [ ] **Flood mode** (`yo -f`) — POSIX `ping -f` equivalent. Send packets as fast as the host can. Stress-tests the kernel network stack.
-- [ ] **Timestamp option** (`yo -D`) — RFC-style timestamps per packet, for log-aggregator piping.
-- [ ] **Bind-source-address** (`yo -I <iface_or_ip>`) — choose source interface. Useful when a host has multiple active links.
-- [ ] **Path-MTU discovery probe** (`yo -M do`) — set DF flag, walk MTU range. Diagnoses tunnel / VPN MTU issues.
-- [ ] **JSON output** (`yo --json`) — machine-readable summary for piping into other tools (`sutra`, `aegis`, `phylax` audit chains).
-- [ ] **Audit-chain integration** — when `libro` lands, log every `yo` invocation + result to the audit chain. Forensic value: *"who pinged what, when, with what outcome."*
-- [ ] **Windows backend** (`src/platform_windows.cyr`). Likely via `IcmpSendEcho` from `Iphlpapi.dll` once Cyrius gains Windows targets at parity.
-- [ ] **Apple backend** (`src/platform_apple.cyr`). macOS supports unprivileged ICMP DGRAM the same way Linux does; iOS / sandboxed environments TBD.
+- [ ] **Loss percentage.** It truncates, so 1 lost out of 101 prints `0% loss`, and
+      a script grepping for `0% loss` gets a false pass. Options: one decimal place,
+      or round any loss up to at least 1%.
+- [ ] **`-c 0` and continuous mode.** `-c 0` sends nothing and exits 1. iputils
+      runs until Ctrl-C by default. yo's default is 4.
+- [ ] **`-W` / `-i` units.** They are milliseconds, where iputils uses seconds
+      (with fractions). Keep milliseconds and document it loudly, or accept
+      iputils' form.
+- [ ] **Interval semantics.** `-i` is the delay after the reply wait, so a lost probe
+      costs `-W` + `-i` (2 s at the defaults; iputils takes 1 s). The alternative
+      is send-to-send pacing.
+- [ ] **Minimum interval for unprivileged users.** iputils requires root below 2 ms.
+      yo allows `-i 0` for anyone, bounded only by RTT or `-W`.
+- [ ] **Exit-code aggregation across targets.** Any reply on any target exits 0, even
+      if another target failed to resolve.
+- [ ] **`-v` / `--verbose`.** Parsed, and nothing reads it. Implement it (per-packet
+      ident, checksum, payload length?) or remove it.
+- [ ] **Reply source-address filtering.** yo does not compare a reply's source with
+      the target, and iputils does not either. Filtering would harden the SOCK_RAW
+      path against spoofing, but break pinging 0.0.0.0 and multicast. Since 0.7.2
+      the random per-process ident already ends cross-talk.
+- [ ] **The missing-resolv.conf default.** yo falls back to 1.1.1.1; glibc and musl
+      use 127.0.0.1. taar holds the same decision open.
+- [ ] **Release build flags.** `CYRIUS_DCE=1` now strips dead code: 86,248 B
+      against 200,936 B for the default build. Decide whether releases ship the DCE
+      build, which settles the size criterion below.
+- [ ] **Freeze.** Write the CLI flags, output lines, exit codes and `--diag` keys
+      down as the 1.0 contract (a `docs/` page that tests are held to), then run the
+      pre-freeze P(-1) the first-party standard requires.
 
 ---
 
 ## v1.0 criteria (release gate)
 
-Ship 1.0 when all of these are true. Status re-assessed 2026-08-26 at 0.6.0 against
-the code and against measurements, not against this file's own prior claims.
+Ship 1.0 when all of these are true.
 
-- [x] **Feature parity with POSIX `ping`** on the Linux backend: `-c`, `-W`, `-i`,
-      `-s`, `-q`, `-v`, IPv4 + IPv6, DNS resolution, reverse-DNS display, multiple
-      targets, TTL display. Plus `-n`, `-4`/`-6` and `--diag`, which POSIX ping has no
-      equivalent of. (Flood `-f`, timestamp `-D`, bind `-I`, MTU `-M` remain post-1.0.)
-- [x] **AGNOS backend working** end-to-end. `src/platform_agnos.cyr` reaches ICMP
-      through the sovereign kernel surface. QEMU smoke green
-      (`scripts/agnos-qemu-smoke.sh`) and iron validation green (agnos 1.51.7 burn).
-- [x] **LAN-on-iron validated** on archaemenid, AGNOS-booted — `yo google.com` 4/4 at
-      0% loss on the 1.51.7 burn, over a real DHCP lease. **Caveat kept deliberately:
-      that burn probed a WAN host by name; a `yo 192.168.1.1` gateway-literal run is
-      not separately recorded.** Not re-opening the band for it, but it is the one
-      line of the original criterion without its own evidence.
-- [x] **No POSIX `socket()` in the AGNOS backend.** `src/platform_agnos.cyr` contains
-      no socket call and, since 0.5.10, no raw syscall numbers either — everything
-      goes through named cyrius wrappers. Formalised in
-      [ADR 0001](../adr/0001-per-backend-sovereignty.md).
-- [x] **Tests**: ≥ 100 assertions — **386** in `tests/yo.tcyr`, covering arg parsing,
-      framing, checksum, IPv4 + IPv6 parsing, RTT format, summary computation and
-      error paths. `tests/yo.fcyr` and `tests/yo.bcyr` both build and run green. The
-      gate itself is sound as of 0.5.9 (exit codes clamped).
-- [x] **Substrate extraction decision made** — `taar` landed at 0.5.5 with `dig` as
-      the genuine second consumer. No ADR deferral needed; the question is answered.
-- [ ] **Docs**: ADR for per-backend sovereignty ✅ (0001), ADR for the kernel-syscall
-      shape ✅ (0002), architecture note on reply-acceptance invariants ✅ (001), guide
-      for the 100%-loss diagnostic flow ✅. *Remaining*: a `README.md` pass, since it
-      predates the AGNOS backend shipping.
-- [x] **CI green on the v1.0 candidate.** `ci.yml` / `release.yml` both green, and as
-      of 0.6.0 CI also runs **`cyrius build --agnos`**, `cyrius bench` and
-      `cyrius fuzz`. The `--agnos` step closed the real gap: `src/platform.cyr`
-      dispatches on `#ifdef`, so the host build never compiles
-      `src/platform_agnos.cyr` and `cyrius test` cannot reach it either — a break in
-      the AGNOS arm used to land green. *Still manual:*
-      `scripts/agnos-qemu-smoke.sh`, which needs sibling checkouts + QEMU + OVMF a
-      GitHub runner does not have. It is deliberately not wired in, because it would
-      SKIP on every run and read as coverage that does not exist.
+- [x] **Feature parity with POSIX `ping` on Linux**: `-c -W -i -s -q -v`, IPv4 +
+      IPv6, DNS and reverse DNS, multiple targets, TTL. Plus `-n`, `-4` / `-6` and
+      `--diag`. (`-f`, `-D`, `-I`, `-M` are v1 backlog.)
+- [x] **AGNOS backend working end to end**: the QEMU smoke passes, and iron
+      validation passed (agnos 1.51.7 burn).
+- [x] **No POSIX `socket()` and no raw syscall numbers in the AGNOS backend** (ADR 0001).
+- [x] **Test gates that mean something**: unit assertions with mutation-checked
+      guards, a fuzz harness over every parser (also under `--poison`), and the
+      namespace integration harness, all in CI.
+- [ ] **0.8.x done**: AGNOS honours `-W`, has counters and has Ctrl-C; Linux is
+      aarch64-correct and run under `qemu-aarch64` in CI; a gateway-literal iron run
+      is recorded.
+- [ ] **0.10.x decisions made and the surface frozen.**
+- [ ] **Binary size**: no larger than the system `ping` (iputils 155,160 B). The old
+      "≤ 30 KB after DCE" was an unmeasured guess and is withdrawn. Today's default
+      build (200,936 B) fails this; the DCE build (86,248 B) passes.
+- [ ] **Wall clock**: at or under iputils' per-invocation time. 0.6.0 measured yo at
+      381 µs against 458 µs; re-measure on the freeze candidate.
+- [ ] **A P(-1) pass on the freeze candidate**, filed in `docs/audit/`.
+- [ ] **CI green on the candidate**, including the integration harness on GitHub's
+      runners (its `sudo unshare` branch first ran at 0.7.2).
 
-### Two criteria that were re-based (they were unmeasured guesses)
+---
 
-The original gate read *"benchmark vs Linux's `iputils-ping` (within 10% wall-clock
-parity, target binary size ≤ 30 KB after DCE)"*. Both halves were written before
-anything was measured. Measured on archaemenid 2026-08-26:
+## v1 backlog (post-1.0)
 
-| | yo 0.6.0 | iputils `ping` 20250605 | verdict |
-|---|---|---|---|
-| wall clock, `-c 1 -n 127.0.0.1`, best of 3 × 100 | **381 µs/run** | 458 µs/run | yo ~17% **faster** — passes, and by more than parity |
-| binary on disk | **152,696 B** | 155,160 B | yo slightly smaller |
+Each waits on the trigger named; none is scheduled.
 
-- [x] **Wall-clock parity** — met, and exceeded.
-- [ ] **Binary size ≤ 30 KB after DCE — WITHDRAWN AS WRITTEN, needs a new number.**
-      The premise is false: `CYRIUS_DCE=1` **NOPs** unreachable functions, it does not
-      strip them. The file is byte-for-byte the same size with and without it
-      (152,696 B either way; 397 unreachable fns / 68,416 bytes NOPed). So "≤ 30 KB
-      after DCE" is not a target yo can hit by any flag it controls — it is a request
-      for a linker/GC pass cyrius does not have. Roughly 144 KB of the binary is
-      `.text`, most of it the vendored stdlib plus taar's 979-line bundle riding along
-      unreferenced. **Decide before 1.0**: either file the section-GC ask against
-      cyrius, or re-state the criterion as "no larger than the system `ping`" — which
-      yo already satisfies. Do not silently drop it.
+| Item | Trigger |
+| --- | --- |
+| Flood mode (`-f`) | a stress-test need; needs the 0.10.x unprivileged-interval decision first |
+| Per-packet timestamps (`-D`) | log-aggregator piping demand |
+| Bind a source interface or address (`-I`) | multi-homed hosts asking |
+| Path-MTU probe (`-M do`, DF set) | tunnel / VPN MTU diagnosis demand |
+| JSON output (`--json`) | a consumer (sutra, aegis, phylax) that reads it |
+| Audit-chain logging | `libro` shipping a consumer API |
+| IPv6 on AGNOS (`yo -6`) | agnos growing an IPv6 subsystem. NDP *is* ICMPv6, so this is a kernel subsystem, not a syscall ask; filed in agnos's roadmap § OPEN |
+| `%zone` scope IDs on AGNOS | link-local IPv6 on agnos (subsumed by the item above) |
+| Windows backend (`IcmpSendEcho`) | cyrius Windows targets at parity |
+| Apple backend (macOS DGRAM ICMP) | cyrius macOS targets at parity |
 
-## Out of scope (for v1.0)
+## Out of scope
 
-Deliberate exclusions — keeps future contributors from adding to v1.0 by accident.
+- **Privilege model.** On AGNOS a raw send will need a `kavach` capability; on Linux
+  yo works through `ping_group_range` or CAP_NET_RAW. Capability gating belongs to
+  aegis / kavach, not yo.
+- **A multi-host load harness.** That is a `whirl --bench`-class concern.
+- **TUI / GUI.** yo is CLI-only.
 
-- **Privilege model** — yo on the AGNOS backend will require a `kavach` capability for raw send; on Linux it works via `ping_group_range` (unprivileged) or CAP_NET_RAW (root). The capability-gating story is in `aegis` / `kavach`, not in yo itself.
-- **Multi-host load-test harness** — that's a `whirl --bench`-class concern, not a ping-class concern.
-- **GUI** — TUI / GUI front-end. yo is CLI-only; future graphical network-diagnostic surfaces belong in a separate `nexus`-class repo if anyone wants one.
-- **Windows / macOS backends pre-1.0** — those are post-1.0 work even though the platform layer is structured to accept them.
-- **`taar` extraction pre-emptively** — wait for the second-consumer signal (dig with real code). Naming a future shared lib is not the same as building it.
+---
+
+## Appendix: adopting cmdit (CLI parsing)
+
+**Demand-gated, not a forced sweep.** The 2026-06-25 ecosystem CLI review
+([agnosticos `planning/cmdit.md`](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/cmdit.md))
+lists yo as a Tier-1 drop-in. This was read against cmdit 1.2.6 / 1.3.1 source on
+2026-10-14 and refreshed for yo 0.7.2. cmdit is at **1.5.1** (cyrius 6.7.18) as of
+2026-11-08, so re-read its README at the tag you adopt. yo parses with stdlib
+`flags`, so this is the kii/anuenue re-fold rather than a rewrite.
+
+**Site → cmdit:**
+
+- [ ] `cli_new`: `flags_new()` → `cmdit_new("yo")`, and drop the `-h` registration
+  and its slot (cmdit owns `-h/--help`). `flags_add_int` → `cmdit_int`;
+  `flags_add_bool(fs,c,l,0,h)` → `cmdit_bool(fs,c,l,h)`.
+- [ ] Keep `cli_parse_argv(reg, argc, argv)` as the pure test seam, calling
+  `cmdit_parse_argv`. `main` does `n = cmdit_argv(h)` and then
+  `cli_parse_argv(reg, n, cmdit_raw_argv(h))`; delete `_materialize_argv`. yo has
+  no env or required flags, so no `cmdit_finalize`.
+- [ ] Map `CMDIT_HELP` → `CLI_HELP` and `CMDIT_RESULT_ERR` → `CLI_ERR_PARSE`. Missing
+  host → `cmdit_require_positionals(h, 1)`, after the AF check, to keep today's order.
+  Keep yo's own error lines.
+- [ ] Keep the post-parse checks: the `< 0` checks, the 0.7.2 upper bounds and
+  `-W >= 1` (`CLI_ERR_RANGE`). `cmdit_range` rejects inside the parse loop, so
+  `yo -h -c -3` would become an error where it prints help today. The `-4`/`-6`
+  mutex stays caller-side.
+- [ ] Help: since 0.7.2 yo prints its own rows on **stdout** (`_cli_help_row`), because
+  `flags_print_help` writes to stderr. Use `cmdit_help_flags` only if it writes to
+  stdout, or keep yo's rows.
+- [ ] **Decide the new surface.** cmdit auto-registers `-V/--version`; it does not clash
+  with `-v`, and iputils `ping -V` is version too. yo has no version string in `src/`,
+  so add one mirroring `VERSION` (whirl's `src/version.cyr` pattern).
+- [ ] Check whether cmdit rejects an integer that overflows (0.9.x "integer flags that
+  wrap"); if it does, adopting it closes that item.
+
+**`cyrius.cyml`:** drop `"flags"` from `[deps] stdlib` (`src/cli.cyr` is its only
+user), keep `"args"` and `"io"`, and add `[deps.cmdit]` with `git`, the adopted
+`tag` and `modules = ["dist/cmdit.cyr"]`.
+
+**Tests that move:** the `cli …` groups in `tests/yo.tcyr` drive `cli_parse_argv`
+through `_mk_argv` and keep working while the `CliResult` wrapper stays. The
+`CLI_REG_SIZE == 96` assertion changes when the help slot goes. `CLI_HELP` is 1,
+but `CMDIT_HELP` is 2.
+
+**Output-identity bar:** stdout, stderr and exit code are byte-identical for a bare
+host, every flag in short and long form, the error paths, and multi-target runs.
+The intended `--help` diffs are cmdit's auto rows. Since cmdit 1.3.1 two more
+diffs are intended: a bool given `=value` (`yo --verbose=0`) becomes an error, and
+positionals past 128 are kept. Then run `scripts/agnos-qemu-smoke.sh` for the
+AGNOS argv path.
 
 ---
 
 ## Cross-references
 
-- **Pivot memory**: [[project-yo-multi-backend-pivot]] — the 2026-05-23 multi-backend pivot and its rationale.
-- **Extraction memory**: [[feedback-yo-extract-after-second-consumer]] — don't pre-build shared libs from naming alone.
-- **Substrate**: [taar](https://github.com/MacCracken/taar) — **shipped**, currently 0.5.0. yo folded onto it at 0.5.5 and consumes one symbol, `ipv4_parse`.
-- **Sibling tools**: `whirl` (curl/wget, 0.6.4) and `dig` (DNS, 0.3.5) — both **real and shipping**, not planned. All three share taar. Family drift as of 2026-08-26: yo is on cyrius 6.5.35 / taar 0.5.0 while dig is on 6.2.24 / taar 0.3.1 and whirl on 6.4.25 / taar 0.3.1.
-- **AGNOS backend gates** — **BOTH CLOSED**, verified against live source 2026-08-26: `cyrius/lib/args.cyr:99` has its agnos branch (since cyrius 6.0.87/6.1.32), and `icmp_echo`#55 / UDP #51-54 / `net_config`#61 are ring-3 in `agnos/kernel/core/syscall.cyr` (since agnos 1.45.4). Iron RX was proven long before either. See § 0.6.x.
-- **Kernel-growth posture**: agnos kernel *source* (`net_icmp.cyr`, `syscall.cyr`) + memory [[project_agnos_kernel_growth_rules]]. Do NOT trust agnos's state.md for yo's blocker status — it lagged reality (claimed the userland target was missing when it ships in cyrius today).
-- **Naming lane**: English-wordplay / trickster lane per [[feedback_naming_lanes]] memory. Family: cmdrs, bnrmr, iam, hapi, kii, yo, whirl, dig.
-
-## Recorded by cyrius 6.7.6 (2026-10-08) — for the next cyrius pin move
-
-✅ **Done at yo 0.7.0 (cyrius 6.7.9, 2026-11-08).** Checked against the tool, item by item:
-
-- [x] A default resolve in this checkout builds taar's tag and prints
-      `hint: 1 dep has a local checkout not in use (taar); CYRIUS_LOCAL=1 builds it`.
-- [x] `CYRIUS_LOCAL=1` builds `../taar` (at the time, `d203629`, two commits past 0.6.0) from
-      `build/local-deps/lib/`. Before and after hashes show `lib/` and `cyrius.lock` were not written.
-- [x] Commit pins: the lock already carried one from yo 0.6.2's CI-faithful resolve. It was regenerated at
-      0.7.0 so it holds only taar 0.6.0's `2c02641`.
-- [x] `cyrius deps --locked`: yo's CI had no lock guard or `sed` step to replace; it ran plain `cyrius deps`.
-      Tested at 6.7.9 on a lock with one hash zeroed: plain `deps` fails (rc 1) on a stdlib leaf that disagrees
-      with the pin, but rewrites a wrong `lib/taar.cyr` hash and exits 0. `--locked` fails on both and writes
-      nothing. `ci.yml` and `release.yml` now resolve with `--locked`. It does not flag a leftover old-tag commit
-      row, so regenerate the lock at a tag bump.
-- [x] The `cyrius.cyml` comment is rewritten: `git`+`tag` is what every default resolve builds, and `path` is
-      local mode only.
-
-The original note follows.
-
-⛔ Needs cyrius >= 6.7.6 — nothing to do until cyrius 6.7.6 is tagged; then at your pin bump:
-
-- **Git first: a `path` beside `git` / `tag` becomes a dev override** (here: `taar`).
-  From 6.7.6 it is read only in local mode (`CYRIUS_LOCAL=1`, `CYRIUS_LOCAL=<dep,dep>` or `--local`).
-  With no switch, `cyrius deps` / `build` resolve the TAG (commit pin checked) and print one `hint:`
-  line naming the checkout not used, so a local build and CI compile the same code.
-- Local mode prints a `local:` line per override and builds from `build/local-deps/` without writing
-  `lib/` or `cyrius.lock`; a hand-written `include "lib/<dep>.cyr"` sees the override there too (the
-  compiler's `CYRIUS_LIB_OVERLAY`, set by `cyrius`).
-- The first default resolve adds commit pins for these deps to `cyrius.lock` — a one-time diff.
-- CI lock guards and `sed`-the-path-out steps can become `cyrius deps --locked`.
-- `cyrius.cyml:24-25`'s "`path` drives local dev resolution; `git`+`tag` is the published fallback" holds only
-  with the switch on.
-- Reference: the cyrius guide's *Git first; local development is a switch (6.7.6)*.
-
-## Adopting cmdit (CLI parsing)
-
-**Demand-gated, not a forced sweep.** The 2026-06-25 ecosystem CLI review
-([agnosticos `planning/cmdit.md`](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/cmdit.md))
-lists yo as a Tier-1 drop-in. This note was read against cmdit 1.2.6 source on 2026-10-14. Nothing was built or run.
-yo already parses with stdlib `flags`, so this is the kii/anuenue re-fold rather than a rewrite.
-
-**Hand-rolled today:**
-
-- `src/cli.cyr:60-76`: `cli_new` makes `flags_new()` plus 11 registrations. They are a manual `-h/--help` (`:64`),
-  four ints (`-c` 4, `-W` 1000, `-i` 1000, `-s` 56; `:26-29`) and bools `-q -v -n -4 -6` plus long-only `--diag`.
-  A 96-byte index registry backs them (`:40-54`).
-- `src/cli.cyr:83-97`: `cli_parse_argv` checks, in order, `flags_parse` → `CLI_ERR_PARSE`, then help, then the four
-  `< 0` checks (`CLI_ERR_NEGATIVE`), then `-4`+`-6` (`CLI_ERR_AF_CONFLICT`), then no host
-  (`CLI_ERR_MISSING_TARGET`).
-- `src/main.cyr:17-25` is `_materialize_argv`. `:47-56` dispatches; each error writes its own line, then
-  `cli_print_usage(2)`, then exits 2.
-- `src/cli.cyr:129-144`: the synopsis and the "yo — ICMP echo probe" header go to stdout. The rows come from
-  `flags_print_help` on **stderr**. There is no `--version` anywhere in `src/`.
-
-**Site → cmdit:**
-
-- [ ] `flags_new()` → `cmdit_new("yo")`, and drop the `-h` registration and its slot (cmdit owns `-h/--help`).
-  `flags_add_int` → `cmdit_int` (same arguments). `flags_add_bool(fs,c,l,0,h)` → `cmdit_bool(fs,c,l,h)`.
-- [ ] Keep `cli_parse_argv(reg, argc, argv)` as the pure test seam, calling `cmdit_parse_argv`. `main` does
-  `n = cmdit_argv(h)` and then `cli_parse_argv(reg, n, cmdit_raw_argv(h))`. Delete `_materialize_argv`. yo has no
-  env or required flags, so no `cmdit_finalize`.
-- [ ] Map `CMDIT_HELP` → `CLI_HELP` and `CMDIT_RESULT_ERR` → `CLI_ERR_PARSE`. Missing host →
-  `cmdit_require_positionals(h, 1)`, called after the AF check to keep today's order. Keep `main.cyr`'s exact error
-  lines rather than `cmdit_print_error`.
-- [ ] Keep the post-parse `< 0` checks. `cmdit_range` rejects inside the parse loop, so `yo -h -c -3` would become
-  an error where it prints help today. The `-4`/`-6` mutex stays caller-side (cmdit v2 backlog). Neither blocks.
-- [ ] `cli_print_help` keeps its framing and swaps `flags_print_help` → `cmdit_help_flags` (same rows, same stderr).
-- [ ] **Decide the new surface.** cmdit auto-registers `-V/--version`. It does not clash with yo's `-v`, and iputils
-  `ping -V` is also version. Answer `CMDIT_VERSION` with `cmdit_version`. yo has no version string in `src/`, so
-  add one mirroring `VERSION` (whirl's `src/version.cyr` pattern).
-
-**`cyrius.cyml`:** drop `"flags"` from `[deps] stdlib`, since `src/cli.cyr` is its only user. Keep `"args"` and
-`"io"`. Add the block below. `1.3.0` is not tagged yet as of 2026-10-14, and `1.2.6` has the same API. cmdit's dist
-builds on 6.6.2, yo's pin, so no pin bump.
-
-```
-[deps.cmdit]
-git = "https://github.com/MacCracken/cmdit.git"
-tag = "1.3.0"
-modules = ["dist/cmdit.cyr"]
-```
-
-**Tests that move:** `tests/yo.tcyr` has eight `cli …` groups (`:119`, `:133`, `:144`, `:154`, `:737`, `:818`,
-`:851`, `:879`). They drive `cli_parse_argv` through `_mk_argv` (`:24`) and keep working while the `CliResult`
-wrapper stays. `:848` pins `CLI_REG_SIZE == 96` and changes when the help slot goes. If tests compare `CMDIT_*`
-directly, note that `CLI_HELP` is 1 but `CMDIT_HELP` is 2. `tests/yo.fcyr` and `tests/yo.bcyr` touch no CLI code
-(checked).
-
-**Output-identity bar:** stdout, stderr and exit code are byte-identical for a bare host, every flag in short and
-long form, the four error paths, and multi-target runs. The only intended `--help` diff is cmdit's auto rows:
-`show this help and exit` (was `show this help`) and a new `-V, --version` row. Then run
-`scripts/agnos-qemu-smoke.sh` (`:274`) for the AGNOS argv path.
-
-**Noted, not cmdit's:** `-v/--verbose` is registered (`src/cli.cyr:70`), but only `cli.cyr` and the tests read it.
-Carry it across as-is. Positionals past 128 are dropped silently by yo's 6.6.2 stdlib `flags` and by cmdit
-(`CMDIT_POS_MAX`) alike. Stdlib ≥ 6.6.5 grows instead, so adopting cmdit forgoes that fix until cmdit grows too.
-
-References: cmdit's [`README.md`](https://github.com/MacCracken/cmdit/blob/main/README.md) (API reference) and
-[`docs/development/roadmap.md`](https://github.com/MacCracken/cmdit/blob/main/docs/development/roadmap.md)
-(v2 backlog). Worked migrations: kii `src/cli.cyr`, and anuenue `src/main.cyr` (custom help around
-`cmdit_help_flags`).
-
-**Update — cmdit 1.3.1 (2026-10-14):** cmdit now grows its positional array instead of dropping past 128, and a
-refused growth is `CMDIT_ERR_NOMEM`, so adopting it no longer forgoes the stdlib 6.6.5 fix noted above. 1.3.1 also
-rejects a bool given `=value` with `CMDIT_ERR_UNEXPECTED_VALUE`. yo's vendored 6.6.2 stdlib `flags` predates both
-fixes: today `yo --verbose=0` turns verbose on and positionals past 128 are dropped. Under cmdit 1.3.1 the first
-is an error and the second keeps every host, so add both to the output-identity bar's intended diffs. Pin
-`tag = "1.3.1"` in the block above.
+- [ADR 0001](../adr/0001-per-backend-sovereignty.md) — why the sovereignty rule is per backend.
+- [ADR 0002](../adr/0002-focused-kernel-icmp-syscall.md) — why `icmp_echo`#55 is one-shot, and what that costs.
+- [Architecture note 001](../architecture/001-reply-acceptance-invariants.md) — what yo checks before believing a reply.
+- [The 0.7.2 audit](../audit/2026-11-08-audit.md) — findings, method, and the deferred items above.
+- **Substrate**: [taar](https://github.com/MacCracken/taar); yo consumes one symbol, `ipv4_parse`.
+- **Family**: `dig` (DNS) and `whirl` (curl/wget) share taar. Versions and drift are in [`state.md`](state.md).
+- **Verify against source, not prose**: agnos's and cyrius's own state docs have lagged their code before. Read the kernel and the stdlib.

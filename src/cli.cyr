@@ -1,7 +1,7 @@
 # cli.cyr — yo CLI surface (flag registration + parse + accessors).
 #
 # Thin wrapper over lib/flags.cyr that owns yo's flag inventory and
-# defaults per roadmap.md § 0.3.x. Built so cli_parse_argv() can be
+# defaults (since 0.3.0). Built so cli_parse_argv() can be
 # unit-tested with a synthetic argv pointer-array; no /proc reads here.
 #
 # Flags (matches POSIX ping where shapes overlap):
@@ -18,7 +18,7 @@
 #       --diag              on 100% loss, dump first-fail diagnostics
 #
 # `--diag` is long-only (short_ch 0). No short letter is claimed for it
-# deliberately: roadmap.md § Future reserves `-D` for the POSIX-ping
+# deliberately: roadmap.md § v1 backlog reserves `-D` for the POSIX-ping
 # timestamp option, and burning it here would force a rename later.
 #
 # Positional: <host> — required unless --help.
@@ -28,6 +28,31 @@ var YO_DEFAULT_TIMEOUT_MS  = 1000;
 var YO_DEFAULT_INTERVAL_MS = 1000;
 var YO_DEFAULT_SIZE        = 56;
 
+# Upper bounds (audit finding H). A value past them used to be accepted and fail
+# later, badly: `-s 70000` printed "timeout" for every probe (sendto said
+# EMSGSIZE), `-s 3000000000` crashed (alloc refused it and yo wrote through the
+# null pointer), and on AGNOS `-s 2041` and up overran a 2048-byte global.
+#   size: 65535 - 20 (IPv4 header) - 8 (ICMP header), iputils' limit.
+#   -W / -i: one i32 of milliseconds (24.8 days); keeps `ms * 1000` far from
+#   overflow. -W 0 used to mean SO_RCVTIMEO {0,0}, i.e. wait forever, with
+#   Ctrl-C blocked (finding E), so -W starts at 1 ms.
+var YO_MAX_SIZE        = 65507;
+var YO_MAX_MS          = 2147483647;
+var YO_MIN_TIMEOUT_MS  = 1;
+
+# Help strings, shared by registration and cli_print_help so they cannot drift.
+var _CLI_H_HELP     = "show this help";
+var _CLI_H_COUNT    = "echo packets to send";
+var _CLI_H_TIMEOUT  = "per-packet timeout (ms, 1..2147483647)";
+var _CLI_H_INTERVAL = "inter-packet delay (ms)";
+var _CLI_H_SIZE     = "payload bytes (0..65507)";
+var _CLI_H_QUIET    = "summary only";
+var _CLI_H_VERBOSE  = "per-packet detail";
+var _CLI_H_NUMERIC  = "skip reverse DNS lookup";
+var _CLI_H_V4       = "force IPv4 (literal v4 / A only)";
+var _CLI_H_V6       = "force IPv6 (literal v6 / AAAA only)";
+var _CLI_H_DIAG     = "on 100% loss, dump first-fail diagnostics";
+
 enum CliResult {
     CLI_OK                  = 0;
     CLI_HELP                = 1;
@@ -35,7 +60,13 @@ enum CliResult {
     CLI_ERR_MISSING_TARGET  = 3;
     CLI_ERR_NEGATIVE        = 4;
     CLI_ERR_AF_CONFLICT     = 5;
+    CLI_ERR_RANGE           = 6;
 }
+
+# The message for the last CLI_ERR_RANGE (a cstr), so main can name the flag.
+var _cli_range_msg = 0;
+# The message for the last CLI_ERR_RANGE, e.g. "-s/--size must be at most 65507 bytes".
+fn cli_range_message(): i64 { return _cli_range_msg; }
 
 # Registry layout (96 B): flags context + 11 flag indices.
 var CLI_REG_SIZE = 96;
@@ -61,25 +92,26 @@ fn cli_new(): i64 {
     var r = alloc(CLI_REG_SIZE);
     var fs = flags_new();
     store64(r,      fs);
-    store64(r + 8,  flags_add_bool(fs, 104, "help",     0,                       "show this help"));
-    store64(r + 16, flags_add_int (fs,  99, "count",    YO_DEFAULT_COUNT,        "echo packets to send"));
-    store64(r + 24, flags_add_int (fs,  87, "timeout",  YO_DEFAULT_TIMEOUT_MS,   "per-packet timeout (ms)"));
-    store64(r + 32, flags_add_int (fs, 105, "interval", YO_DEFAULT_INTERVAL_MS,  "inter-packet delay (ms)"));
-    store64(r + 40, flags_add_int (fs, 115, "size",     YO_DEFAULT_SIZE,         "payload bytes"));
-    store64(r + 48, flags_add_bool(fs, 113, "quiet",    0,                       "summary only"));
-    store64(r + 56, flags_add_bool(fs, 118, "verbose",  0,                       "per-packet detail"));
-    store64(r + 64, flags_add_bool(fs, 110, "numeric",  0,                       "skip reverse DNS lookup"));
-    store64(r + 72, flags_add_bool(fs,  52, "ipv4",     0,                       "force IPv4 (literal v4 / A only)"));
-    store64(r + 80, flags_add_bool(fs,  54, "ipv6",     0,                       "force IPv6 (literal v6 / AAAA only)"));
-    store64(r + 88, flags_add_bool(fs,   0, "diag",     0,                       "on 100% loss, dump first-fail diagnostics"));
+    store64(r + 8,  flags_add_bool(fs, 104, "help",     0,                       _CLI_H_HELP));
+    store64(r + 16, flags_add_int (fs,  99, "count",    YO_DEFAULT_COUNT,        _CLI_H_COUNT));
+    store64(r + 24, flags_add_int (fs,  87, "timeout",  YO_DEFAULT_TIMEOUT_MS,   _CLI_H_TIMEOUT));
+    store64(r + 32, flags_add_int (fs, 105, "interval", YO_DEFAULT_INTERVAL_MS,  _CLI_H_INTERVAL));
+    store64(r + 40, flags_add_int (fs, 115, "size",     YO_DEFAULT_SIZE,         _CLI_H_SIZE));
+    store64(r + 48, flags_add_bool(fs, 113, "quiet",    0,                       _CLI_H_QUIET));
+    store64(r + 56, flags_add_bool(fs, 118, "verbose",  0,                       _CLI_H_VERBOSE));
+    store64(r + 64, flags_add_bool(fs, 110, "numeric",  0,                       _CLI_H_NUMERIC));
+    store64(r + 72, flags_add_bool(fs,  52, "ipv4",     0,                       _CLI_H_V4));
+    store64(r + 80, flags_add_bool(fs,  54, "ipv6",     0,                       _CLI_H_V6));
+    store64(r + 88, flags_add_bool(fs,   0, "diag",     0,                       _CLI_H_DIAG));
     return r;
 }
 
 # Parse argv into the registry. argv must be a pointer to argc cstr
 # pointers (laid out as `argv + i*8`), same shape lib/flags.cyr wants.
-# Returns CliResult — caller dispatches on it. Validation: rejects
-# negative count/timeout/interval/size; treats --help as a non-error
-# terminal state so caller can print help and exit 0.
+# Returns CliResult — caller dispatches on it. Validation, in order: parse,
+# --help (a non-error terminal state, so `yo -h -c -3` still prints help),
+# negative count/timeout/interval/size, the upper bounds and -W >= 1
+# (CLI_ERR_RANGE, message in cli_range_message()), -4/-6, a target.
 fn cli_parse_argv(reg, argc, argv): i64 {
     var fs = _cli_reg_ctx(reg);
     var rc = flags_parse(fs, argc, argv);
@@ -89,6 +121,23 @@ fn cli_parse_argv(reg, argc, argv): i64 {
     if (flags_get_int(fs, _cli_reg_timeout(reg))  < 0) { return CLI_ERR_NEGATIVE; }
     if (flags_get_int(fs, _cli_reg_interval(reg)) < 0) { return CLI_ERR_NEGATIVE; }
     if (flags_get_int(fs, _cli_reg_size(reg))     < 0) { return CLI_ERR_NEGATIVE; }
+    var w = flags_get_int(fs, _cli_reg_timeout(reg));
+    if (w < YO_MIN_TIMEOUT_MS) {
+        _cli_range_msg = "-W/--timeout must be at least 1 ms (0 would wait forever)";
+        return CLI_ERR_RANGE;
+    }
+    if (w > YO_MAX_MS) {
+        _cli_range_msg = "-W/--timeout must be at most 2147483647 ms";
+        return CLI_ERR_RANGE;
+    }
+    if (flags_get_int(fs, _cli_reg_interval(reg)) > YO_MAX_MS) {
+        _cli_range_msg = "-i/--interval must be at most 2147483647 ms";
+        return CLI_ERR_RANGE;
+    }
+    if (flags_get_int(fs, _cli_reg_size(reg)) > YO_MAX_SIZE) {
+        _cli_range_msg = "-s/--size must be at most 65507 bytes";
+        return CLI_ERR_RANGE;
+    }
     var v4 = flags_get_bool(fs, _cli_reg_v4(reg));
     var v6 = flags_get_bool(fs, _cli_reg_v6(reg));
     if ((v4 == 1) && (v6 == 1)) { return CLI_ERR_AF_CONFLICT; }
@@ -99,15 +148,25 @@ fn cli_parse_argv(reg, argc, argv): i64 {
 # Accessors — all read from the underlying flags context, so they
 # reflect parsed values OR registered defaults.
 fn cli_help(reg):        i64 { return flags_get_bool(_cli_reg_ctx(reg), _cli_reg_help(reg)); }
+# -c / --count: probes to send.
 fn cli_count(reg):       i64 { return flags_get_int (_cli_reg_ctx(reg), _cli_reg_count(reg)); }
+# -W / --timeout: per-probe reply wait, ms (1..2147483647).
 fn cli_timeout_ms(reg):  i64 { return flags_get_int (_cli_reg_ctx(reg), _cli_reg_timeout(reg)); }
+# -i / --interval: delay between probes, ms.
 fn cli_interval_ms(reg): i64 { return flags_get_int (_cli_reg_ctx(reg), _cli_reg_interval(reg)); }
+# -s / --size: payload bytes (0..65507).
 fn cli_size(reg):        i64 { return flags_get_int (_cli_reg_ctx(reg), _cli_reg_size(reg)); }
+# -q / --quiet: 1 = summary only.
 fn cli_quiet(reg):       i64 { return flags_get_bool(_cli_reg_ctx(reg), _cli_reg_quiet(reg)); }
+# -v / --verbose: 1 when given. Parsed but not yet acted on (roadmap).
 fn cli_verbose(reg):     i64 { return flags_get_bool(_cli_reg_ctx(reg), _cli_reg_verbose(reg)); }
+# -n / --numeric: 1 = no reverse DNS lookup.
 fn cli_numeric(reg):     i64 { return flags_get_bool(_cli_reg_ctx(reg), _cli_reg_numeric(reg)); }
+# -4 / --ipv4: 1 = IPv4 only (literal v4 or an A lookup).
 fn cli_ipv4(reg):        i64 { return flags_get_bool(_cli_reg_ctx(reg), _cli_reg_v4(reg)); }
+# -6 / --ipv6: 1 = IPv6 only (literal v6 or an AAAA lookup).
 fn cli_ipv6(reg):        i64 { return flags_get_bool(_cli_reg_ctx(reg), _cli_reg_v6(reg)); }
+# --diag: 1 = print first-fail diagnostics on 100% loss.
 fn cli_diag(reg):        i64 { return flags_get_bool(_cli_reg_ctx(reg), _cli_reg_diag(reg)); }
 
 # First positional argument = target host. Returns 0 if none.
@@ -127,18 +186,75 @@ fn cli_target_at(reg, idx): i64 {
 
 # Print "Usage: ..." line to the given fd (1 stdout, 2 stderr).
 fn cli_print_usage(fd): i64 {
-    var u = "Usage: yo [-c count] [-W timeout_ms] [-i interval_ms] [-s size] [-q|-v] [-n] [-4|-6] [--diag] <host> [host ...]\n";
-    sys_write(fd, u, strlen(u));
+    var u1 = "Usage: yo [-c count] [-W timeout_ms] [-i interval_ms] [-s size] [-q|-v] [-n] [-4|-6]";
+    var u2 = " [--diag] <host> [host ...]\n";
+    sys_write(fd, u1, strlen(u1));
+    sys_write(fd, u2, strlen(u2));
     return 0;
 }
 
-# Print full help (usage + flag list) to stdout. Wraps flags_print_help.
+# Name the token a parse error came from, on stderr: `yo: unknown option:
+# --bogus`. Falls back to the old bare line when flags recorded no token.
+fn cli_print_parse_error(reg): i64 {
+    var fs = _cli_reg_ctx(reg);
+    var arg = flags_error_arg(fs);
+    if (arg == 0) {
+        var m = "yo: bad option\n";
+        sys_write(2, m, strlen(m));
+        return 0;
+    }
+    var what = flags_error_str(flags_error(fs));
+    sys_write(2, "yo: ", 4);
+    sys_write(2, what, strlen(what));
+    sys_write(2, ": ", 2);
+    sys_write(2, arg, strlen(arg));
+    var lf[8];
+    store8(&lf, 10);                    # LF via a stack byte: a 1-byte "\n" literal mis-binds
+    sys_write(2, &lf, 1);
+    return 0;
+}
+
+# One option row, in lib/flags.cyr's flags_print_help format, but on stdout:
+#   "  -c, --count <int>\techo packets to send\n"   (short_ch 0: four spaces)
+fn _cli_help_row(short_ch, long_name, is_int, help): i64 {
+    var b[8];
+    sys_write(1, "  ", 2);
+    if (short_ch != 0) {
+        store8(&b, 45); store8(&b + 1, short_ch); store8(&b + 2, 44); store8(&b + 3, 32);
+        sys_write(1, &b, 4);                                # "-c, "
+    } else {
+        sys_write(1, "    ", 4);
+    }
+    sys_write(1, "--", 2);
+    sys_write(1, long_name, strlen(long_name));
+    if (is_int == 1) { sys_write(1, " <int>", 6); }
+    store8(&b, 9);
+    sys_write(1, &b, 1);                                    # TAB
+    sys_write(1, help, strlen(help));
+    store8(&b, 10);
+    sys_write(1, &b, 1);                                    # LF
+    return 0;
+}
+
+# Print full help (usage + flag list) to stdout. The rows used to come from
+# flags_print_help, which writes to stderr, so `yo -h | less` lost them (audit
+# finding Q); they are written here instead, in the same format and order.
 fn cli_print_help(reg): i64 {
     println("yo — ICMP echo probe");
     println("");
     cli_print_usage(1);
     println("");
     println("Options:");
-    flags_print_help(_cli_reg_ctx(reg));
+    _cli_help_row(104, "help",     0, _CLI_H_HELP);
+    _cli_help_row( 99, "count",    1, _CLI_H_COUNT);
+    _cli_help_row( 87, "timeout",  1, _CLI_H_TIMEOUT);
+    _cli_help_row(105, "interval", 1, _CLI_H_INTERVAL);
+    _cli_help_row(115, "size",     1, _CLI_H_SIZE);
+    _cli_help_row(113, "quiet",    0, _CLI_H_QUIET);
+    _cli_help_row(118, "verbose",  0, _CLI_H_VERBOSE);
+    _cli_help_row(110, "numeric",  0, _CLI_H_NUMERIC);
+    _cli_help_row( 52, "ipv4",     0, _CLI_H_V4);
+    _cli_help_row( 54, "ipv6",     0, _CLI_H_V6);
+    _cli_help_row(  0, "diag",     0, _CLI_H_DIAG);
     return 0;
 }

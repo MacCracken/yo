@@ -168,11 +168,14 @@ are worth knowing:
   `SOCK_RAW` here, **that is your bug**; upgrade. Details in
   [architecture note 001](../architecture/001-reply-acceptance-invariants.md).
 
-Since 0.6.0 the RAW path demultiplexes for itself — it matches the sequence
-number, and the ident too (which is yo's own `0x1234` on RAW, unlike on
-`SOCK_DGRAM` where the kernel rewrites it), and it keeps reading until one
-matches or `-W` expires. So a second `yo` racing on the same box no longer
-crosses replies, and yo's own outbound request no longer consumes the read.
+The RAW path demultiplexes for itself: it matches the sequence number, the
+ident (yo's own on RAW, unlike on `SOCK_DGRAM` where the kernel rewrites it),
+and on IPv4 the checksum, and it keeps reading until one matches or `-W`
+expires, so yo's own outbound request does not consume the read.
+- **On a build older than 0.7.2, two yo processes on RAW crossed replies.** The
+  ident was the constant `0x1234` in every yo, and on IPv6 RAW it was not
+  compared at all, so a dead host probed while another yo pinged a live one
+  could report replies and exit 0. Since 0.7.2 the ident is random per process.
 
 ---
 
@@ -207,10 +210,11 @@ check `ip -6 route` before suspecting yo.
 ### `last recv: -11 EAGAIN (timeout — sent, nothing came back within -W)`
 
 This is the one case that gets words instead of a number, because it reads so
-differently from the others. `-11` is `EAGAIN`: `SO_RCVTIMEO` fired.
-`platform_set_recv_timeout_ms` (`platform_linux.cyr:118`) applies `-W` to the socket
-before the loop, so this means the send succeeded and the timeout elapsed with
-nothing to read.
+differently from the others. `-11` is `EAGAIN`: the reply wait ran out. Since
+0.7.2 the probe loop waits in `platform_wait_readable` (a `ppoll` against the
+`-W` deadline, which Ctrl-C can also end) and records `-11` when that wait runs
+out; before, `SO_RCVTIMEO` on a blocking recv produced the same value. Either
+way it means the send succeeded and the timeout elapsed with nothing to read.
 
 That is a genuine network timeout. The host is down, the reply is filtered, or
 `-W` is too short. In order:

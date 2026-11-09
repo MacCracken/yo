@@ -1,15 +1,21 @@
-# dns.cyr — minimal recursive-query DNS resolver (A records only).
+# dns.cyr — minimal stub resolver: A, AAAA and PTR over UDP.
 #
-# Self-contained: parses /etc/resolv.conf for a nameserver, sends a
-# single RFC 1035 query over UDP, parses the response to extract the
-# first A record. Does NOT pull in lib/net.cyr — uses platform_udp_*
-# directly per the per-backend sovereignty rule (Linux backend today;
-# AGNOS backend will offer its own dns_resolve via sovereign UDP
-# primitives later).
+# Reads the nameserver from the platform (AGNOS: the DHCP-leased resolver,
+# net_config#61) or /etc/resolv.conf, sends one RFC 1035 query per attempt over
+# UDP, and parses the first answer of the wanted type. Talks to the network only
+# through platform_udp_* (per-backend sovereignty), never lib/net.cyr.
 #
-# Scope: A records only (IPv4). AAAA arrives in 0.5.x with IPv6.
-# No /etc/hosts fallback yet — pure DNS query path. No DNSSEC, no
-# EDNS0. taar extraction waits for a second consumer (dig).
+# Not here: /etc/hosts, EDNS(0), DNSSEC, TCP fallback on TC, owner-name / CNAME
+# chain validation, v6 nameservers. taar carries the shared IPv4 codec; this
+# resolver stays in-tree (taar's resolver has its own consumers and policies).
+#
+# What a reply has to get past before it is believed (0.7.2 audit, finding K):
+#   - the socket only hears the server it asked (Linux: a connected UDP socket;
+#     AGNOS: the recorded peer, since the kernel delivers by port alone);
+#   - a random 16-bit query ID (getrandom), not one derived from the clock;
+#   - the question section must echo ours (name, type, class);
+#   - an answer counts only when its CLASS is IN;
+#   - a PTR name is printed in the banner, so it must be a hostname (finding C).
 #
 # Wire layout (RFC 1035 §4.1, big-endian throughout):
 #   Header (12 B):
@@ -34,7 +40,7 @@ var DNS_TYPE_A        = 1;
 var DNS_TYPE_PTR      = 12;
 var DNS_TYPE_AAAA     = 28;       # RFC 3596 §2.1
 var DNS_CLASS_IN      = 1;
-var DNS_FALLBACK_NS   = 0x01010101;   # 1.1.1.1 — when /etc/resolv.conf is missing/empty.
+var DNS_FALLBACK_NS   = 0x01010101;   # 1.1.1.1 — only when resolv.conf names no server at all.
 var DNS_TIMEOUT_MS    = 2000;
 var DNS_MAX_ATTEMPTS  = 2;
 # Reverse lookups commonly NXDOMAIN — keep them snappy so probe start
@@ -43,7 +49,10 @@ var DNS_REV_TIMEOUT_MS    = 1000;
 var DNS_REV_MAX_ATTEMPTS  = 1;
 var DNS_MAX_MSG       = 512;          # classic non-EDNS DNS message size.
 var DNS_MAX_LABEL     = 63;
+var DNS_MAX_NAME      = 255;          # RFC 1035 §3.1: a name is at most 255 octets on the wire.
 var DNS_MAX_NAME_JUMPS = 16;          # compression-pointer loop guard.
+var DNS_RESOLV_UNUSABLE = 0 - 2;      # resolv.conf names servers, none usable.
+var DNS_RESOLV_CAP    = 4096;         # bytes of resolv.conf read.
 var DNS_RESOLV_CONF   = "/etc/resolv.conf";
 
 # Byte-by-byte equality. n-byte buffers, no NUL terminator required.
@@ -56,11 +65,33 @@ fn _dns_bytes_eq(a, b, n): i64 {
     return 1;
 }
 
+# ASCII-case-folding byte compare over n bytes. A question section's length
+# bytes (1..63) and type/class bytes are never letters, so folding the whole
+# region only relaxes the name's letters, as RFC 4343 asks.
+fn _dns_bytes_eq_nocase(a, b, n): i64 {
+    var i = 0;
+    while (i < n) {
+        var x = load8(a + i);
+        var y = load8(b + i);
+        if ((x >= 65) && (x <= 90)) { x = x + 32; }
+        if ((y >= 65) && (y <= 90)) { y = y + 32; }
+        if (x != y) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
 # Encode a hostname into DNS QNAME wire form:
-#   "google.com" → 06 67 6f 6f 67 6c 65 03 63 6f 6d 00   (13 bytes)
+#   "google.com" → 06 67 6f 6f 67 6c 65 03 63 6f 6d 00   (12 bytes)
 # Trailing dot ("google.com.") is accepted as the same canonical form.
 # Returns bytes written; DNS_FAIL on empty hostname, empty label
-# ("foo..bar", ".foo"), or label > 63 bytes.
+# ("foo..bar", ".foo"), a label over 63 bytes, or a name whose encoded form
+# would exceed 255 bytes.
+#
+# The 255 cap is checked BEFORE each byte is stored (audit finding B): the
+# hostname comes from argv and can be ~128 KiB, and the query buffer is 512
+# bytes, so a verdict reached only after encoding would already have written
+# past it. With the check, nothing lands at or beyond buf + 255.
 fn _dns_encode_qname(host, buf): i64 {
     var bi = 0;
     var hi = 0;
@@ -78,6 +109,9 @@ fn _dns_encode_qname(host, buf): i64 {
             if (c == 0) { break; }
             if (c == 46) { break; }                 # '.'
             if (ll >= DNS_MAX_LABEL) { return DNS_FAIL; }
+            # This byte lands at bi and the terminator at bi + 1 or later, so the
+            # name stays within DNS_MAX_NAME only while bi + 2 <= DNS_MAX_NAME.
+            if (bi + 2 > DNS_MAX_NAME) { return DNS_FAIL; }
             store8(buf + bi, c);
             bi = bi + 1;
             ll = ll + 1;
@@ -91,11 +125,8 @@ fn _dns_encode_qname(host, buf): i64 {
     return DNS_FAIL;
 }
 
-# Build a full DNS query for host with the given QTYPE (A or AAAA).
-# Caller-owned buf must hold at least 12 + qname_len + 4 bytes (worst
-# case ~270 B). Returns bytes written, or DNS_FAIL if the qname doesn't
-# encode.
-fn _dns_build_query(buf, qid, host, qtype): i64 {
+# Write a 12-byte query header: the ID, RD=1, QDCOUNT=1, every other count 0.
+fn _dns_put_header(buf, qid): i64 {
     store8(buf,     (qid >> 8) & 0xFF);
     store8(buf + 1, qid & 0xFF);
     store8(buf + 2, 0x01);                      # flags hi: RD=1
@@ -104,13 +135,25 @@ fn _dns_build_query(buf, qid, host, qtype): i64 {
     store8(buf + 6, 0); store8(buf + 7, 0);     # ANCOUNT = 0
     store8(buf + 8, 0); store8(buf + 9, 0);     # NSCOUNT = 0
     store8(buf + 10, 0); store8(buf + 11, 0);   # ARCOUNT = 0
-    var qn = _dns_encode_qname(host, buf + DNS_HEADER_LEN);
-    if (qn < 0) { return DNS_FAIL; }
-    var off = DNS_HEADER_LEN + qn;
+    return DNS_HEADER_LEN;
+}
+
+# Write QTYPE + QCLASS=IN at buf+off. Returns the offset past them.
+fn _dns_put_qtail(buf, off, qtype): i64 {
     store8(buf + off,     (qtype >> 8) & 0xFF);
     store8(buf + off + 1, qtype & 0xFF);
     store8(buf + off + 2, 0); store8(buf + off + 3, DNS_CLASS_IN);
     return off + 4;
+}
+
+# Build a full DNS query for host with the given QTYPE (A or AAAA).
+# Caller-owned buf must hold at least 12 + 255 + 4 = 271 bytes. Returns bytes
+# written, or DNS_FAIL if the qname doesn't encode.
+fn _dns_build_query(buf, qid, host, qtype): i64 {
+    _dns_put_header(buf, qid);
+    var qn = _dns_encode_qname(host, buf + DNS_HEADER_LEN);
+    if (qn < 0) { return DNS_FAIL; }
+    return _dns_put_qtail(buf, DNS_HEADER_LEN + qn, qtype);
 }
 
 # Skip a (possibly-compressed) RFC 1035 name starting at buf+off.
@@ -138,7 +181,8 @@ fn _dns_skip_name(buf, len, off): i64 {
 # count written (not counting NUL), or DNS_FAIL on truncation, oversize
 # label, out-of-bounds pointer, jump-loop, or out-buf overflow.
 # DNS_MAX_NAME_JUMPS caps pointer chains so a malicious response can't
-# spin forever.
+# spin forever. Label bytes are copied as they are: a caller that prints
+# the result must check it first (_dns_name_is_hostname).
 fn _dns_decode_name(buf, len, off, out, out_cap): i64 {
     var op = 0;
     var jumps = 0;
@@ -175,11 +219,31 @@ fn _dns_decode_name(buf, len, off, out, out_cap): i64 {
     return DNS_FAIL;
 }
 
-# Validate header + walk the answer section to find the first record
+# Is s[0..n) a hostname a terminal can be shown? Letters, digits, '-', '_'
+# and '.' only (RFC 952 / 1123 LDH, plus the underscore real PTR data uses).
+# A label is binary on the wire, so a PTR answer can carry ESC sequences, CR /
+# LF or NUL; glibc's resolver drops such names (res_hnok) before ping prints
+# them, and yo has to do the same (audit finding C).
+fn _dns_name_is_hostname(s, n): i64 {
+    if (n <= 0) { return 0; }
+    var i = 0;
+    while (i < n) {
+        var c = load8(s + i);
+        var ok = 0;
+        if ((c >= 97) && (c <= 122)) { ok = 1; }        # a-z
+        if ((c >= 65) && (c <= 90))  { ok = 1; }        # A-Z
+        if ((c >= 48) && (c <= 57))  { ok = 1; }        # 0-9
+        if ((c == 45) || (c == 95) || (c == 46)) { ok = 1; }   # - _ .
+        if (ok == 0) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# Validate header + walk the answer section to find the first class-IN record
 # matching `rtype`. Returns the offset of that record's RDATA byte
 # (RDLENGTH is at off-2..off-1). DNS_FAIL on any validation failure or
-# no matching record. Shared by _dns_parse_response (A) and
-# _dns_parse_ptr_response (PTR).
+# no matching record. Shared by the A, AAAA and PTR parsers.
 fn _dns_walk_to_type(buf, len, expected_qid, rtype): i64 {
     if (len < DNS_HEADER_LEN) { return DNS_FAIL; }
     var qid = (load8(buf) << 8) | load8(buf + 1);
@@ -208,14 +272,31 @@ fn _dns_walk_to_type(buf, len, expected_qid, rtype): i64 {
         if (off < 0) { return DNS_FAIL; }
         if (off + 10 > len) { return DNS_FAIL; }
         var t = (load8(buf + off) << 8) | load8(buf + off + 1);
+        var cls = (load8(buf + off + 2) << 8) | load8(buf + off + 3);
         var rdlen = (load8(buf + off + 8) << 8) | load8(buf + off + 9);
         off = off + 10;
         if (off + rdlen > len) { return DNS_FAIL; }
-        if (t == rtype) { return off; }
+        # Audit finding K: a record of another class (CH, HS) is not an address.
+        if ((t == rtype) && (cls == DNS_CLASS_IN)) { return off; }
         off = off + rdlen;
         a = a + 1;
     }
     return DNS_FAIL;
+}
+
+# Does a response's question section echo the query's? RFC 5452 §9.1: a
+# resolver should accept a reply only when ID, question name, QTYPE and QCLASS
+# all match what it asked. The query's question runs from byte 12 to qlen; the
+# response must have QDCOUNT 1 and the same bytes there (name case-folded).
+# 1 = matches, 0 = not ours.
+fn _dns_question_matches(resp, rlen, query, qlen): i64 {
+    if (rlen < qlen) { return 0; }
+    if (qlen <= DNS_HEADER_LEN) { return 0; }
+    if (load8(resp + 4) != 0) { return 0; }
+    if (load8(resp + 5) != 1) { return 0; }
+    if (load8(resp) != load8(query)) { return 0; }
+    if (load8(resp + 1) != load8(query + 1)) { return 0; }
+    return _dns_bytes_eq_nocase(resp + DNS_HEADER_LEN, query + DNS_HEADER_LEN, qlen - DNS_HEADER_LEN);
 }
 
 # Parse a DNS response and return the first A-record's packed IPv4.
@@ -227,36 +308,46 @@ fn _dns_parse_response(buf, len, expected_qid): i64 {
     if (rdata < 0) { return DNS_FAIL; }
     var rdlen = (load8(buf + rdata - 2) << 8) | load8(buf + rdata - 1);
     if (rdlen != 4) { return DNS_FAIL; }
-    return (load8(buf + rdata) << 24) | (load8(buf + rdata + 1) << 16) | (load8(buf + rdata + 2) << 8) | load8(buf + rdata + 3);
+    return (load8(buf + rdata) << 24) | (load8(buf + rdata + 1) << 16)
+    | (load8(buf + rdata + 2) << 8) | load8(buf + rdata + 3);
 }
 
 # Parse a DNS PTR response, decoding the first PTR record's RDATA name
 # into out as a NUL-terminated cstr. Returns name length (no NUL) or
-# DNS_FAIL.
+# DNS_FAIL — including when the name is not a hostname, since the caller
+# prints it (audit finding C); out is then left as an empty string.
 fn _dns_parse_ptr_response(buf, len, expected_qid, out, out_cap): i64 {
     var rdata = _dns_walk_to_type(buf, len, expected_qid, DNS_TYPE_PTR);
     if (rdata < 0) { return DNS_FAIL; }
-    return _dns_decode_name(buf, len, rdata, out, out_cap);
+    var n = _dns_decode_name(buf, len, rdata, out, out_cap);
+    if (n < 0) { return DNS_FAIL; }
+    if (_dns_name_is_hostname(out, n) == 0) {
+        if (out_cap > 0) { store8(out, 0); }
+        return DNS_FAIL;
+    }
+    return n;
 }
 
-# Parse /etc/resolv.conf-shaped text and return the first IPv4
-# nameserver's packed address. Returns DNS_FAIL if no parseable line.
+# Parse /etc/resolv.conf-shaped text and return the first usable IPv4
+# nameserver's packed address. Returns:
+#   >= 0                 the address;
+#   DNS_FAIL             no `nameserver <value>` line at all (a fallback is fine);
+#   DNS_RESOLV_UNUSABLE  nameserver lines exist, but none yo can use (IPv6, junk).
+# The last two used to be the same answer, so a host whose resolv.conf lists
+# only IPv6 resolvers silently had every lookup sent to 1.1.1.1 — past a VPN's,
+# a split-horizon or a filtering resolver (audit finding I).
 # Accepts:
 #   nameserver 1.2.3.4
 #   nameserver\t8.8.8.8     # trailing comment ok
+#   nameserver 1.2.3.4\r    (CRLF files — audit finding N)
 # Skips:
 #   # ... (comment lines)
-#   nameserver fe80::1      (IPv6 — see the limitation below)
-#
-# ⚠ KNOWN LIMITATION — a v6 resolver is silently ignored, not reported. The value
-# goes to ipv4_parse, which rejects it, so the line is skipped like a comment and
-# the caller falls through to the 1.1.1.1 fallback. On a v6-only network DNS then
-# appears to work by accident, via a hardcoded v4 address that may not be
-# reachable at all. Fixing it needs ipv6_parse on this path plus a v6 UDP query
-# socket. Tracked in docs/development/roadmap.md § 0.6.x.
+#   nameserver fe80::1      (IPv6: needs ipv6_parse here plus a v6 UDP query
+#                            socket; roadmap 0.9.x)
 # (On AGNOS this path is usually not reached: platform_dns_server() prefers the
 # DHCP-leased resolver from net_config#61 over /etc/resolv.conf.)
 fn _dns_resolv_conf_nameserver(buf, len): i64 {
+    var saw_server_line = 0;
     var i = 0;
     while (i < len) {
         var le = i;
@@ -267,62 +358,89 @@ fn _dns_resolv_conf_nameserver(buf, len): i64 {
         var p = i;
         while (p < le) {
             var c = load8(buf + p);
-            if (c != 32) { if (c != 9) { break; } }
+            if ((c != 32) && (c != 9)) { break; }
             p = p + 1;
         }
-        if (p < le) {
-            if (load8(buf + p) != 35) {                 # not '#'
-                if (le - p >= 11) {
-                    if (_dns_bytes_eq(buf + p, "nameserver", 10) == 1) {
-                        var sep = load8(buf + p + 10);
-                        if ((sep == 32) || (sep == 9)) {
-                            p = p + 10;
-                            while (p < le) {
-                                var c2 = load8(buf + p);
-                                if (c2 != 32) { if (c2 != 9) { break; } }
-                                p = p + 1;
-                            }
-                            var ip_start = p;
-                            while (p < le) {
-                                var c3 = load8(buf + p);
-                                if ((c3 == 32) || (c3 == 9) || (c3 == 35)) { break; }
-                                p = p + 1;
-                            }
-                            var n = p - ip_start;
-                            if (n > 0) {
-                                var ipbuf = alloc(n + 1);
-                                memcpy(ipbuf, buf + ip_start, n);
-                                store8(ipbuf + n, 0);
-                                var addr = ipv4_parse(ipbuf);
-                                if (addr >= 0) { return addr; }
-                            }
-                        }
+        if ((p < le) && (load8(buf + p) != 35)) {       # not '#'
+            if ((le - p >= 11) && (_dns_bytes_eq(buf + p, "nameserver", 10) == 1)) {
+                var sep = load8(buf + p + 10);
+                if ((sep == 32) || (sep == 9)) {
+                    p = p + 10;
+                    while (p < le) {
+                        var c2 = load8(buf + p);
+                        if ((c2 != 32) && (c2 != 9)) { break; }
+                        p = p + 1;
+                    }
+                    var ip_start = p;
+                    while (p < le) {
+                        var c3 = load8(buf + p);
+                        if ((c3 == 32) || (c3 == 9) || (c3 == 35) || (c3 == 13)) { break; }
+                        p = p + 1;
+                    }
+                    var n = p - ip_start;
+                    if (n > 0) {
+                        saw_server_line = 1;
+                        var ipbuf = alloc(n + 1);
+                        memcpy(ipbuf, buf + ip_start, n);
+                        store8(ipbuf + n, 0);
+                        var addr = ipv4_parse(ipbuf);
+                        if (addr >= 0) { return addr; }
                     }
                 }
             }
         }
         i = le + 1;
     }
+    if (saw_server_line == 1) { return DNS_RESOLV_UNUSABLE; }
     return DNS_FAIL;
 }
 
+# How much of a resolv.conf read to parse. A read that filled the buffer may
+# have cut its last line mid-address — `nameserver 10.0.0.12` arriving as
+# `10.0.0.1`, a valid wrong server — so only complete lines count then.
+# Returns n when the read was short, else the length through the last '\n'
+# (0 if there is none). Audit finding N.
+fn _dns_resolv_complete_len(buf, n, cap): i64 {
+    if (n < cap) { return n; }
+    var e = n;
+    while (e > 0) {
+        if (load8(buf + e - 1) == 10) { return e; }
+        e = e - 1;
+    }
+    return 0;
+}
+
+# The nameserver decision, pure so it is testable. `parsed` is
+# _dns_resolv_conf_nameserver's answer, `truncated` 1 when the read filled the
+# buffer. A usable server wins; a file that names none at all (or no file)
+# falls back to DNS_FALLBACK_NS; a file whose servers are all unusable, or a
+# cut-off file that yielded nothing, fails closed (DNS_FAIL) rather than
+# sending the lookup to a third party.
+fn _dns_resolv_choose(parsed, truncated): i64 {
+    if (parsed >= 0) { return parsed; }
+    if (parsed == DNS_RESOLV_UNUSABLE) { return DNS_FAIL; }
+    if (truncated == 1) { return DNS_FAIL; }
+    return DNS_FALLBACK_NS;
+}
+
 # Pick a nameserver: prefer the kernel-leased resolver (AGNOS net_config#61),
-# then /etc/resolv.conf, then DNS_FALLBACK_NS (1.1.1.1) so `yo google.com` works
-# on misconfigured hosts. On agnos the kernel learns the on-subnet DNS server from
-# the DHCP lease; preferring it avoids the off-subnet 1.1.1.1 fallback, which needs
-# working gateway routing the kernel can't guarantee on real iron (the QEMU-passed
-# / iron-failed gap). platform_dns_server() returns 0 on Linux, so the resolv.conf
-# path is unchanged there. Returns packed IPv4.
+# then /etc/resolv.conf, then DNS_FALLBACK_NS (1.1.1.1) when no file names a
+# server at all. On agnos the kernel learns the on-subnet DNS server from the
+# DHCP lease; preferring it avoids the off-subnet 1.1.1.1 fallback, which needs
+# working gateway routing the kernel can't guarantee on real iron (the
+# QEMU-passed / iron-failed gap). platform_dns_server() returns 0 on Linux, so
+# the resolv.conf path is the one used there. Returns a packed IPv4, or
+# DNS_FAIL when the configured servers are unusable (see _dns_resolv_choose).
 fn _dns_choose_nameserver(): i64 {
     var ksrv = platform_dns_server();
     if (ksrv > 0) { return ksrv; }
-    var rc = alloc(4096);
-    var n = platform_read_file(DNS_RESOLV_CONF, rc, 4096);
-    if (n > 0) {
-        var ns = _dns_resolv_conf_nameserver(rc, n);
-        if (ns >= 0) { return ns; }
-    }
-    return DNS_FALLBACK_NS;
+    var rc = alloc(DNS_RESOLV_CAP);
+    var n = platform_read_file(DNS_RESOLV_CONF, rc, DNS_RESOLV_CAP);
+    if (n <= 0) { return _dns_resolv_choose(DNS_FAIL, 0); }
+    var truncated = 0;
+    if (n >= DNS_RESOLV_CAP) { truncated = 1; }
+    var usable = _dns_resolv_complete_len(rc, n, DNS_RESOLV_CAP);
+    return _dns_resolv_choose(_dns_resolv_conf_nameserver(rc, usable), truncated);
 }
 
 # Build a PTR-query QNAME for the given packed IPv4. For 8.8.8.8 this
@@ -388,51 +506,66 @@ fn _dns_nibble_to_hex(n): i64 {
 # Build a full PTR query message for the given packed IPv4. Returns
 # bytes written. Layout matches _dns_build_query except QTYPE = PTR.
 fn _dns_build_ptr_query(buf, qid, packed_addr): i64 {
-    store8(buf,     (qid >> 8) & 0xFF);
-    store8(buf + 1, qid & 0xFF);
-    store8(buf + 2, 0x01);
-    store8(buf + 3, 0x00);
-    store8(buf + 4, 0); store8(buf + 5, 1);
-    store8(buf + 6, 0); store8(buf + 7, 0);
-    store8(buf + 8, 0); store8(buf + 9, 0);
-    store8(buf + 10, 0); store8(buf + 11, 0);
+    _dns_put_header(buf, qid);
     var qn = _dns_build_reverse_qname(packed_addr, buf + DNS_HEADER_LEN);
-    var off = DNS_HEADER_LEN + qn;
-    store8(buf + off,     0); store8(buf + off + 1, DNS_TYPE_PTR);
-    store8(buf + off + 2, 0); store8(buf + off + 3, DNS_CLASS_IN);
-    return off + 4;
+    return _dns_put_qtail(buf, DNS_HEADER_LEN + qn, DNS_TYPE_PTR);
 }
 
-# Resolve a hostname to a packed IPv4 via DNS. Returns DNS_FAIL on
-# failure (timeout × DNS_MAX_ATTEMPTS, malformed response, NXDOMAIN,
-# no A record). The QID is derived from CLOCK_MONOTONIC microseconds
-# — sufficient to bind reply to query on a per-process basis.
-fn dns_resolve(host): i64 {
+# Build a full PTR query message for the given packed IPv6 (16 bytes,
+# network order). QTYPE = PTR, same shape as the v4 builder.
+fn _dns_build_ptr_query_v6(buf, qid, addr16): i64 {
+    _dns_put_header(buf, qid);
+    var qn = _dns_build_reverse_qname_v6(addr16, buf + DNS_HEADER_LEN);
+    return _dns_put_qtail(buf, DNS_HEADER_LEN + qn, DNS_TYPE_PTR);
+}
+
+# A fresh query ID. RFC 5452 §9.2 asks for an unpredictable one; the old
+# `now_us & 0xFFFF` was a clock reading (audit finding K).
+fn _dns_new_qid(): i64 {
+    return platform_random_u16();
+}
+
+# Send `query` (qlen bytes, its ID already set) to the chosen nameserver and
+# read the reply into resp (DNS_MAX_MSG bytes). Up to `attempts` sends, each
+# waiting `timeout_ms`. Returns the reply length once one echoes our ID and
+# question, else DNS_FAIL. The four resolve entry points below are this plus a
+# builder and a parser; it used to be written out four times.
+fn _dns_exchange(query, qlen, resp, timeout_ms, attempts): i64 {
     var ns = _dns_choose_nameserver();
+    if (ns < 0) { return DNS_FAIL; }
     var fd = platform_udp_open();
     if (fd < 0) { return DNS_FAIL; }
-    platform_set_recv_timeout_ms(fd, DNS_TIMEOUT_MS);
-
-    var query = alloc(DNS_MAX_MSG);
-    var qid = platform_now_us() & 0xFFFF;
-    var qlen = _dns_build_query(query, qid, host, DNS_TYPE_A);
-    if (qlen < 0) { platform_close(fd); return DNS_FAIL; }
-
-    var resp = alloc(DNS_MAX_MSG);
+    platform_set_recv_timeout_ms(fd, timeout_ms);
     var attempt = 0;
-    while (attempt < DNS_MAX_ATTEMPTS) {
+    while (attempt < attempts) {
         var sent = platform_udp_send_to(fd, ns, DNS_PORT, query, qlen);
         if (sent > 0) {
             var n = platform_udp_recv(fd, resp, DNS_MAX_MSG);
             if (n > 0) {
-                var addr = _dns_parse_response(resp, n, qid);
-                if (addr >= 0) { platform_close(fd); return addr; }
+                if (_dns_question_matches(resp, n, query, qlen) == 1) {
+                    platform_close(fd);
+                    return n;
+                }
             }
         }
         attempt = attempt + 1;
     }
     platform_close(fd);
     return DNS_FAIL;
+}
+
+# Resolve a hostname to a packed IPv4 via DNS. Returns DNS_FAIL on
+# failure (timeout × DNS_MAX_ATTEMPTS, malformed response, NXDOMAIN,
+# no A record, a name that does not encode, unusable resolvers).
+fn dns_resolve(host): i64 {
+    var query = alloc(DNS_MAX_MSG);
+    var qid = _dns_new_qid();
+    var qlen = _dns_build_query(query, qid, host, DNS_TYPE_A);
+    if (qlen < 0) { return DNS_FAIL; }
+    var resp = alloc(DNS_MAX_MSG);
+    var n = _dns_exchange(query, qlen, resp, DNS_TIMEOUT_MS, DNS_MAX_ATTEMPTS);
+    if (n < 0) { return DNS_FAIL; }
+    return _dns_parse_response(resp, n, qid);
 }
 
 # Parse a DNS response and copy the first AAAA record's 16-byte rdata
@@ -449,54 +582,16 @@ fn _dns_parse_aaaa_response(buf, len, expected_qid, out): i64 {
 
 # Resolve a hostname to a packed IPv6 address via DNS AAAA query.
 # Writes the 16 packed network-order bytes into out. Returns 0 on
-# success, DNS_FAIL on any failure (timeout × DNS_MAX_ATTEMPTS,
-# malformed response, NXDOMAIN, no AAAA record).
+# success, DNS_FAIL on any failure.
 fn dns_resolve_aaaa(host, out): i64 {
-    var ns = _dns_choose_nameserver();
-    var fd = platform_udp_open();
-    if (fd < 0) { return DNS_FAIL; }
-    platform_set_recv_timeout_ms(fd, DNS_TIMEOUT_MS);
-
     var query = alloc(DNS_MAX_MSG);
-    var qid = platform_now_us() & 0xFFFF;
+    var qid = _dns_new_qid();
     var qlen = _dns_build_query(query, qid, host, DNS_TYPE_AAAA);
-    if (qlen < 0) { platform_close(fd); return DNS_FAIL; }
-
+    if (qlen < 0) { return DNS_FAIL; }
     var resp = alloc(DNS_MAX_MSG);
-    var attempt = 0;
-    while (attempt < DNS_MAX_ATTEMPTS) {
-        var sent = platform_udp_send_to(fd, ns, DNS_PORT, query, qlen);
-        if (sent > 0) {
-            var n = platform_udp_recv(fd, resp, DNS_MAX_MSG);
-            if (n > 0) {
-                if (_dns_parse_aaaa_response(resp, n, qid, out) == 0) {
-                    platform_close(fd);
-                    return 0;
-                }
-            }
-        }
-        attempt = attempt + 1;
-    }
-    platform_close(fd);
-    return DNS_FAIL;
-}
-
-# Build a full PTR query message for the given packed IPv6 (16 bytes,
-# network order). QTYPE = PTR, same shape as the v4 builder.
-fn _dns_build_ptr_query_v6(buf, qid, addr16): i64 {
-    store8(buf,     (qid >> 8) & 0xFF);
-    store8(buf + 1, qid & 0xFF);
-    store8(buf + 2, 0x01);
-    store8(buf + 3, 0x00);
-    store8(buf + 4, 0); store8(buf + 5, 1);
-    store8(buf + 6, 0); store8(buf + 7, 0);
-    store8(buf + 8, 0); store8(buf + 9, 0);
-    store8(buf + 10, 0); store8(buf + 11, 0);
-    var qn = _dns_build_reverse_qname_v6(addr16, buf + DNS_HEADER_LEN);
-    var off = DNS_HEADER_LEN + qn;
-    store8(buf + off,     0); store8(buf + off + 1, DNS_TYPE_PTR);
-    store8(buf + off + 2, 0); store8(buf + off + 3, DNS_CLASS_IN);
-    return off + 4;
+    var n = _dns_exchange(query, qlen, resp, DNS_TIMEOUT_MS, DNS_MAX_ATTEMPTS);
+    if (n < 0) { return DNS_FAIL; }
+    return _dns_parse_aaaa_response(resp, n, qid, out);
 }
 
 # Reverse-resolve a packed IPv4 to a hostname via PTR query. Writes the
@@ -505,29 +600,14 @@ fn _dns_build_ptr_query_v6(buf, qid, addr16): i64 {
 # forward DNS because most IPs have no PTR record and we don't want
 # probe start to drag.
 fn dns_reverse_resolve(packed_addr, out, out_cap): i64 {
-    var ns = _dns_choose_nameserver();
-    var fd = platform_udp_open();
-    if (fd < 0) { return DNS_FAIL; }
-    platform_set_recv_timeout_ms(fd, DNS_REV_TIMEOUT_MS);
-
     var query = alloc(DNS_MAX_MSG);
-    var qid = platform_now_us() & 0xFFFF;
+    var qid = _dns_new_qid();
     var qlen = _dns_build_ptr_query(query, qid, packed_addr);
-
     var resp = alloc(DNS_MAX_MSG);
-    var attempt = 0;
-    while (attempt < DNS_REV_MAX_ATTEMPTS) {
-        var sent = platform_udp_send_to(fd, ns, DNS_PORT, query, qlen);
-        if (sent > 0) {
-            var n = platform_udp_recv(fd, resp, DNS_MAX_MSG);
-            if (n > 0) {
-                var nm = _dns_parse_ptr_response(resp, n, qid, out, out_cap);
-                if (nm > 0) { platform_close(fd); return nm; }
-            }
-        }
-        attempt = attempt + 1;
-    }
-    platform_close(fd);
+    var n = _dns_exchange(query, qlen, resp, DNS_REV_TIMEOUT_MS, DNS_REV_MAX_ATTEMPTS);
+    if (n < 0) { return DNS_FAIL; }
+    var nm = _dns_parse_ptr_response(resp, n, qid, out, out_cap);
+    if (nm > 0) { return nm; }
     return DNS_FAIL;
 }
 
@@ -535,28 +615,13 @@ fn dns_reverse_resolve(packed_addr, out, out_cap): i64 {
 # `ip6.arpa.` zone. Same shape as the v4 variant — short timeout, single
 # attempt, NXDOMAIN returns DNS_FAIL.
 fn dns_reverse_resolve_v6(addr16, out, out_cap): i64 {
-    var ns = _dns_choose_nameserver();
-    var fd = platform_udp_open();
-    if (fd < 0) { return DNS_FAIL; }
-    platform_set_recv_timeout_ms(fd, DNS_REV_TIMEOUT_MS);
-
     var query = alloc(DNS_MAX_MSG);
-    var qid = platform_now_us() & 0xFFFF;
+    var qid = _dns_new_qid();
     var qlen = _dns_build_ptr_query_v6(query, qid, addr16);
-
     var resp = alloc(DNS_MAX_MSG);
-    var attempt = 0;
-    while (attempt < DNS_REV_MAX_ATTEMPTS) {
-        var sent = platform_udp_send_to(fd, ns, DNS_PORT, query, qlen);
-        if (sent > 0) {
-            var n = platform_udp_recv(fd, resp, DNS_MAX_MSG);
-            if (n > 0) {
-                var nm = _dns_parse_ptr_response(resp, n, qid, out, out_cap);
-                if (nm > 0) { platform_close(fd); return nm; }
-            }
-        }
-        attempt = attempt + 1;
-    }
-    platform_close(fd);
+    var n = _dns_exchange(query, qlen, resp, DNS_REV_TIMEOUT_MS, DNS_REV_MAX_ATTEMPTS);
+    if (n < 0) { return DNS_FAIL; }
+    var nm = _dns_parse_ptr_response(resp, n, qid, out, out_cap);
+    if (nm > 0) { return nm; }
     return DNS_FAIL;
 }

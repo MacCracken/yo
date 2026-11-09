@@ -23,7 +23,7 @@ Same shape as `ping`, Cyrius-native end to end:
 
 - Per-backend sovereignty: the **Linux backend** uses POSIX `socket()` pragmatically (unprivileged SOCK_DGRAM ICMP with SOCK_RAW fallback), reached by raw syscall number — no libc. The **AGNOS backend** ships and uses sovereign ring-3 syscalls only, with no `socket()` anywhere on that path. See [ADR 0001](docs/adr/0001-per-backend-sovereignty.md).
 - No `libc`, no `glibc`, no `musl`. Statically linked against the Cyrius stdlib only.
-- Reads naturally as a verb: `yo google.com`, `yo -c 4 192.168.1.1`, `yo -W 2 router.local`.
+- Reads naturally as a verb: `yo google.com`, `yo -c 4 192.168.1.1`, `yo -W 2000 router.local`.
 
 ## Platforms
 
@@ -47,6 +47,8 @@ Same shape as `ping`, Cyrius-native end to end:
 cyrius deps                            # resolve stdlib + sibling deps
 cyrius build src/main.cyr build/yo     # compile
 cyrius test                            # run [build].test + tests/*.tcyr
+cyrius audit                           # fmt + lint + docs + tests + bench (CI gates it)
+bash tests/integration/run.sh          # end to end, in a network namespace (unshare / sudo)
 ```
 
 Toolchain pin lives in `cyrius.cyml` (`[package].cyrius`). Don't hardcode it in CI YAML.

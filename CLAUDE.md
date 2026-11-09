@@ -60,7 +60,7 @@ cyrius test                          # run [build].test + tests/*.tcyr
 - Research before implementation — check vidya / existing patterns
 - Build with `cyrius build`, not raw `cat file | cc5` — the manifest auto-resolves deps and prepends includes
 - Source files only need project includes — stdlib / external deps auto-resolve from `cyrius.cyml`
-- Every buffer declaration is a contract: `var buf[N]` = N **bytes**, not N entries
+- Every buffer declaration is a contract: a bare `var buf[N]` is N **bytes** inside a function but N **8-byte slots** (N × 8 bytes) at module scope — the cyrius guide's scope rule. Size each buffer against its largest write with that in mind
 - `&&` / `||` short-circuit; mixed expressions require explicit parens
 
 ## Rules (Hard Constraints)

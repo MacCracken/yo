@@ -1,7 +1,7 @@
 # platform.cyr — platform dispatch shim.
 #
 # TWO backends ship, and this #ifdef is the only seam between them. Each defines
-# the same 21-function platform_* surface; probe.cyr and dns.cyr call that surface
+# the same 27-function platform_* surface; probe.cyr and dns.cyr call that surface
 # and never learn which one they got.
 #
 #   src/platform_linux.cyr   POSIX sockets, reached by raw syscall number (no
@@ -19,9 +19,26 @@
 # infra) and cannot honour -W. See docs/adr/0001-per-backend-sovereignty.md for
 # the rule and docs/adr/0002-focused-kernel-icmp-syscall.md for the costs.
 #
-# Windows / macOS are post-1.0 (roadmap.md § Future). They are host kernels, so
+# Windows / macOS are post-1.0 (roadmap.md § v1 backlog). They are host kernels, so
 # they inherit the pragmatic Linux treatment when they arrive; the sovereignty
 # rule only bites on AGNOS.
+#
+# Pure helpers that one backend needs and the host test build must reach live
+# above the #ifdef, so tests/yo.tcyr (always a Linux build) can exercise them.
+
+# Did a datagram come from the peer we sent to? `from` is the 16-byte record the
+# AGNOS udp_recv#53 kernel fills: source ip at +0 (packed, first octet high, as
+# ipv4_parse packs it) and source port at +8 — the layout taar 0.6.2 confirmed
+# in the agnos kernel source (net_ingress.cyr, net.cyr). The kernel delivers a
+# datagram by destination port alone, so without this check anyone who guesses
+# the port can answer a DNS query (audit finding K). A zero `peer_port` means
+# nothing has been sent yet and accepts any sender. 1 = accept, 0 = drop.
+fn platform_peer_match(from, peer_ip, peer_port): i64 {
+    if (peer_port == 0) { return 1; }
+    if (load64(from) != peer_ip) { return 0; }
+    if (load64(from + 8) != peer_port) { return 0; }
+    return 1;
+}
 
 #ifdef CYRIUS_TARGET_AGNOS
 include "src/platform_agnos.cyr"

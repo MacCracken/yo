@@ -8,6 +8,10 @@
 # not declared — see lib/bench.cyr's header); batching amortises it, and
 # bench_report subtracts the calibrated floor.
 #
+# Rows 6-8 (0.7.2) cover the paths the P(-1) audit added work to: reply
+# acceptance with the raw-socket checksum, the PTR hostname check, and the DNS
+# question-echo check.
+#
 # WHAT IS DELIBERATELY NOT BENCHED HERE. The probe loop itself is dominated by
 # the kernel round-trip and by -i pacing, so timing it in-process would measure
 # the network, not yo. End-to-end parity against iputils-ping is a wall-clock
@@ -24,7 +28,12 @@ include "lib/taar.cyr"
 include "src/ipv6.cyr"
 include "src/stats.cyr"
 include "src/output.cyr"
+include "src/cli.cyr"
+include "src/platform.cyr"
+include "src/dns.cyr"
+include "src/probe.cyr"
 
+# The benchmark rows; `cyrius bench` reports each.
 fn main(): i64 {
     alloc_init();
 
@@ -82,6 +91,52 @@ fn main(): i64 {
     while (i < 100000) { output_ipv4_to_buf(0xC0A865CB, fbuf); i = i + 1; }
     bench_batch_stop(b5, 100000);
     bench_report(b5);
+
+    # Reply acceptance on the SOCK_RAW fallback (0.7.2): type, 16-bit seq,
+    # ident and the RFC 1071 verify of the whole 64-byte reply. Once per frame
+    # read, so the checksum pass is the cost the audit added to that path.
+    var rx = alloc(64);
+    icmp_build_echo_request(rx, 0xBEEF, 7, payload, 56);
+    store8(rx, ICMP_ECHO_REPLY);
+    store8(rx + 2, 0); store8(rx + 3, 0);
+    var ck = icmp_checksum(rx, 64);
+    store8(rx + 2, (ck >> 8) & 0xFF); store8(rx + 3, ck & 0xFF);
+    var b6 = bench_new("probe_reply_is_ours raw+cksum");
+    bench_batch_start(b6);
+    i = 0;
+    while (i < 100000) { probe_reply_is_ours(rx, 64, ICMP_ECHO_REPLY, 7, 0xBEEF, 1, 1); i = i + 1; }
+    bench_batch_stop(b6, 100000);
+    bench_report(b6);
+
+    # A PTR answer through the walker, the decoder and the hostname check
+    # (0.7.2): once per literal-IP target.
+    var pr = alloc(128);
+    var pn = _dns_build_ptr_query(pr, 0x1234, 0x08080808);
+    store8(pr + 2, 0x81); store8(pr + 3, 0x80); store8(pr + 7, 1);
+    store8(pr + pn, 0xC0); store8(pr + pn + 1, 0x0C);
+    store8(pr + pn + 2, 0); store8(pr + pn + 3, 12);
+    store8(pr + pn + 4, 0); store8(pr + pn + 5, 1);
+    store8(pr + pn + 6, 0); store8(pr + pn + 7, 0); store8(pr + pn + 8, 0); store8(pr + pn + 9, 60);
+    store8(pr + pn + 10, 0); store8(pr + pn + 11, 12);
+    store8(pr + pn + 12, 3); memcpy(pr + pn + 13, "dns", 3);
+    store8(pr + pn + 16, 6); memcpy(pr + pn + 17, "google", 6);
+    store8(pr + pn + 23, 0);
+    var pl = pn + 24;
+    var pout = alloc(256);
+    var b7 = bench_new("dns PTR parse + hostname check");
+    bench_batch_start(b7);
+    i = 0;
+    while (i < 100000) { _dns_parse_ptr_response(pr, pl, 0x1234, pout, 256); i = i + 1; }
+    bench_batch_stop(b7, 100000);
+    bench_report(b7);
+
+    # The question-echo check every DNS reply now passes (0.7.2).
+    var b8 = bench_new("dns question echo check");
+    bench_batch_start(b8);
+    i = 0;
+    while (i < 100000) { _dns_question_matches(pr, pl, pr, pn); i = i + 1; }
+    bench_batch_stop(b8, 100000);
+    bench_report(b8);
 
     return 0;
 }

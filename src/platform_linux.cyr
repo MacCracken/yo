@@ -1,14 +1,18 @@
 # platform_linux.cyr — Linux backend.
 #
-# Self-contained: raw syscalls only, no lib/net.cyr import. The
-# lib/net.cyr surface covers TCP/UDP but not ICMP / sendto / recvfrom,
-# and it wraps results in tagged unions that this thin backend doesn't
-# need.
+# Self-contained: no lib/net.cyr import. The lib/net.cyr surface covers TCP/UDP
+# but not ICMP, and it wraps results in tagged unions that this thin backend
+# doesn't need.
 #
-# Sovereignty posture (per-backend rule): this file uses POSIX socket()
-# pragmatically. The AGNOS backend (future) will use the sovereign
-# icmp_echo / net_send_raw primitives instead. v1.0 release gate
-# enforces no-POSIX on the AGNOS backend only.
+# Sovereignty posture (per-backend rule, ADR 0001): this file uses POSIX
+# socket() pragmatically. The AGNOS backend (src/platform_agnos.cyr) reaches the
+# kernel's sovereign icmp_echo / udp_* syscalls instead.
+#
+# Syscalls. The original paths call syscall(<x86_64 number>, …) through the
+# _LX_SYS_* constants below, which is x86_64-only (roadmap: route them through
+# the arch-dispatched stdlib sys_* wrappers before any aarch64 target). Code
+# added at 0.7.2 uses the stdlib wrappers (sys_ppoll, sys_connect, sys_sendto,
+# sys_getrandom) so it does not add to that list.
 #
 # Socket strategy:
 #   1. SOCK_DGRAM + IPPROTO_ICMP — unprivileged "ping socket". Works
@@ -16,6 +20,14 @@
 #      /proc/sys/net/ipv4/ping_group_range.
 #   2. Fallback to SOCK_RAW + IPPROTO_ICMP — needs root or CAP_NET_RAW.
 #   3. Both fail → return negative, caller surfaces the EACCES.
+#
+# Memory. cyrius's alloc is a bump allocator with no free, so anything a probe
+# allocates stays allocated for the life of the process. The per-probe paths
+# (send, recv, wait, sleep, clock, interrupt check) used to alloc their scratch
+# on every call — ~410 B per probe, measured as 28.9 MB of peak RSS at 60,000
+# probes and growing without bound (audit finding F). They now use the static
+# buffers below. A bare `var a[N]` at module scope is N 8-byte slots (N × 8
+# bytes), which is how each size below is counted.
 
 var _LX_SYS_READ            = 0;
 var _LX_SYS_OPEN            = 2;
@@ -48,10 +60,26 @@ var _LX_IPV6_RECVHOPLIMIT = 51;   # setsockopt: deliver hop limit as ancillary
 var _LX_IPV6_HOPLIMIT     = 52;   # cmsg_type when IPV6_RECVHOPLIMIT is enabled
 var _LX_CLOCK_MONOTONIC = 1;
 var _LX_SIG_BLOCK     = 0;
+var _LX_SIG_UNBLOCK   = 1;
 var _LX_SIGINT        = 2;
 var _LX_SFD_NONBLOCK  = 2048;     # O_NONBLOCK octal 04000
 var _LX_SIGINFO_SIZE  = 128;      # sizeof(struct signalfd_siginfo)
 var _LX_O_RDONLY      = 0;
+var _LX_POLLIN        = 1;
+var _LX_POLLERR       = 8;
+var _LX_POLLHUP       = 16;
+var _LX_EINTR         = 0 - 4;
+var _LX_IFNAMSIZ      = 16;       # interface names are at most 15 bytes + NUL
+
+# Static per-probe scratch (see "Memory" above). Sizes are N × 8 bytes.
+var _lx_ts[2];                    # 16 B: struct timespec (clock_gettime, nanosleep, ppoll)
+var _lx_sa[4];                    # 32 B: sockaddr_in (16) / sockaddr_in6 (28) for sends
+var _lx_mh[7];                    # 56 B: struct msghdr
+var _lx_iov[2];                   # 16 B: struct iovec
+var _lx_ctl[8];                   # 64 B: cmsg buffer (one TTL / hop-limit record is 24 B)
+var _lx_pfd[2];                   # 16 B: two struct pollfd (8 B each)
+var _lx_sig[16];                  # 128 B: struct signalfd_siginfo
+var _lx_mask[1];                  # 8 B: the SIGINT sigset
 
 # Enable IP_RECVTTL so recvmsg surfaces the response TTL as ancillary
 # (cmsg_level=IPPROTO_IP, cmsg_type=IP_TTL). Best-effort: return value
@@ -63,11 +91,6 @@ fn _lx_enable_recvttl(fd): i64 {
     return syscall(_LX_SYS_SETSOCKOPT, fd, _LX_IPPROTO_IP, _LX_IP_RECVTTL, one, 4);
 }
 
-# Open an ICMP socket. Tries unprivileged SOCK_DGRAM first; falls back
-# to SOCK_RAW. Returns fd ≥ 0 on success, negative on failure (the
-# value is the kernel's negated errno from the last attempt). On
-# success, enables IP_RECVTTL so platform_icmp_recv_ext can return
-# the response TTL alongside the payload.
 # --- diag state (--diag) ---------------------------------------------
 # Which socket flavour actually opened, and the last negative return from
 # the send / recv syscalls. On Linux a failed probe is almost always one
@@ -82,6 +105,21 @@ var _lx_icmp_mode     = 0;
 var _lx_last_send_err = 0;
 var _lx_last_recv_err = 0;
 
+# Forget the previous target's diag facts. probe_run calls this first, so a
+# later target's --diag cannot report an earlier target's socket or errno
+# (audit finding M).
+fn platform_diag_reset(): i64 {
+    _lx_icmp_mode = _LX_ICMP_MODE_NONE;
+    _lx_last_send_err = 0;
+    _lx_last_recv_err = 0;
+    return 0;
+}
+
+# Open an ICMP socket. Tries unprivileged SOCK_DGRAM first; falls back
+# to SOCK_RAW. Returns fd ≥ 0 on success, negative on failure (the
+# value is the kernel's negated errno from the last attempt). On
+# success, enables IP_RECVTTL so platform_icmp_recv_ext can return
+# the response TTL alongside the payload.
 fn platform_icmp_open(): i64 {
     var fd = syscall(_LX_SYS_SOCKET, _LX_AF_INET, _LX_SOCK_DGRAM, _LX_IPPROTO_ICMP);
     if (fd >= 0) {
@@ -97,6 +135,16 @@ fn platform_icmp_open(): i64 {
     return fd2;
 }
 
+# What to tell the user when no ICMP socket opened. Per backend, because the
+# remedy is (the AGNOS arm has no ping_group_range to adjust).
+fn platform_icmp_open_hint(af): i64 {
+    var m1 = "yo: cannot open ICMP socket — try adjusting /proc/sys/net/ipv4/ping_group_range";
+    var m2 = " or run with CAP_NET_RAW\n";
+    sys_write(2, m1, strlen(m1));
+    sys_write(2, m2, strlen(m2));
+    return 0;
+}
+
 # Is the privileged SOCK_RAW fallback in play? probe.cyr needs to know, because
 # the kernel does NOT demultiplex a raw socket: it hands us every matching frame
 # on the host, including our own outbound request and other processes' replies.
@@ -107,13 +155,17 @@ fn platform_icmp_raw_mode(): i64 {
     return 0;
 }
 
+# Close an fd (socket or signalfd).
 fn platform_close(fd): i64 {
     return syscall(_LX_SYS_CLOSE, fd);
 }
 
-# Apply SO_RCVTIMEO so blocking recvfrom returns -EAGAIN after
-# timeout_ms instead of waiting forever. Kernel's timeval struct is
-# {tv_sec: i64, tv_usec: i64} on 64-bit Linux (16 bytes).
+# Apply SO_RCVTIMEO so a blocking recv returns -EAGAIN after timeout_ms instead
+# of waiting forever. The kernel's timeval is {tv_sec: i64, tv_usec: i64} on
+# 64-bit Linux (16 bytes). DNS relies on it; the ICMP path waits in
+# platform_wait_readable and keeps this only as a backstop for the recv that
+# follows a wake-up. timeout_ms must be > 0: {0, 0} means "never time out",
+# which is why the CLI refuses -W 0.
 fn platform_set_recv_timeout_ms(fd, timeout_ms): i64 {
     var tv = alloc(16);
     var secs  = timeout_ms / 1000;
@@ -123,13 +175,11 @@ fn platform_set_recv_timeout_ms(fd, timeout_ms): i64 {
     return syscall(_LX_SYS_SETSOCKOPT, fd, _LX_SOL_SOCKET, _LX_SO_RCVTIMEO, tv, 16);
 }
 
-# Build a sockaddr_in for the given packed IPv4 (host-byte-order, high
-# byte = first octet — matches ipv4_parse output) and the given UDP/TCP
-# port. Writes octets one byte at a time so the on-the-wire order is
-# correct regardless of host endianness. Port is written big-endian
-# (network byte order, RFC 793 §3.1) into sin_port at off 2-3.
-fn _lx_sockaddr_in(packed_addr, port): i64 {
-    var sa = alloc(16);
+# Write a sockaddr_in for the packed IPv4 (high byte = first octet, as
+# ipv4_parse packs it) and port into sa (16 bytes). Octets are written one byte
+# at a time so the on-the-wire order is right regardless of host endianness;
+# the port is big-endian (RFC 793 §3.1) in sin_port at off 2-3.
+fn _lx_sockaddr_in_into(sa, packed_addr, port): i64 {
     memset(sa, 0, 16);
     store16(sa, _LX_AF_INET);
     store8(sa + 2, (port >> 8) & 0xFF);
@@ -141,11 +191,17 @@ fn _lx_sockaddr_in(packed_addr, port): i64 {
     return sa;
 }
 
+# A freshly allocated sockaddr_in — for the paths that run once per target
+# (DNS) and for tests. The per-probe send uses the static _lx_sa.
+fn _lx_sockaddr_in(packed_addr, port): i64 {
+    return _lx_sockaddr_in_into(alloc(16), packed_addr, port);
+}
+
 # sendto(fd, pkt, pkt_len, 0, sa, 16). Returns bytes sent or negative
-# errno. Caller owns pkt and sa. ICMP socket ignores port — pass 0.
+# errno. Caller owns pkt. ICMP socket ignores port — pass 0.
 fn platform_icmp_send_to(fd, packed_addr, pkt, pkt_len): i64 {
-    var sa = _lx_sockaddr_in(packed_addr, 0);
-    var n = syscall(_LX_SYS_SENDTO, fd, pkt, pkt_len, 0, sa, 16);
+    _lx_sockaddr_in_into(&_lx_sa, packed_addr, 0);
+    var n = syscall(_LX_SYS_SENDTO, fd, pkt, pkt_len, 0, &_lx_sa, 16);
     if (n < 0) { _lx_last_send_err = n; }
     return n;
 }
@@ -156,41 +212,48 @@ fn platform_icmp_recv(fd, buf, maxlen): i64 {
     return syscall(_LX_SYS_RECVFROM, fd, buf, maxlen, 0, 0, 0);
 }
 
-# Walk a kernel-filled cmsg buffer and return the IP_TTL value if a
-# matching ancillary record is present. Returns 0 when no IP_TTL cmsg
-# is found, the chain is malformed, or the buffer is too small for a
-# bare header. Pure helper — unit-testable from synthetic buffers.
+# Walk a kernel-filled cmsg buffer for the record (level, type) and return the
+# low byte of its 4-byte int payload (an IP_TTL or IPV6_HOPLIMIT), or 0 when no
+# such record is present, the chain is malformed, or the buffer is too small.
+# Pure — unit-testable from synthetic buffers.
 #
 # cmsg layout on Linux x86_64:
 #   +0  cmsg_len   (i64, includes header + data, excludes alignment pad)
 #   +8  cmsg_level (i32)
 #   +12 cmsg_type  (i32)
-#   +16 data ...   (for IP_TTL: i32 holding 0..255)
+#   +16 data ...   (here an i32 holding 0..255)
 # Each record is followed by CMSG_ALIGN(cmsg_len) padding to size_t.
-fn _lx_cmsg_find_ttl(control, controllen): i64 {
+# A record is read only when it lies inside controllen and is long enough to
+# hold the int it is read for (audit finding V: the old walkers read +16..+19
+# of a record that might be only 16 bytes long).
+fn _lx_cmsg_find(control, controllen, level, type): i64 {
     var off = 0;
     while (off + 16 <= controllen) {
         var clen  = load64(control + off);
         if (clen < 16) { return 0; }
-        var level = load32(control + off + 8);
-        var type  = load32(control + off + 12);
-        if (level == _LX_IPPROTO_IP && type == _LX_IP_TTL) {
+        if (off + clen > controllen) { return 0; }
+        var lv = load32(control + off + 8);
+        var ty = load32(control + off + 12);
+        if ((lv == level) && (ty == type)) {
+            if (clen < 20) { return 0; }
             return load32(control + off + 16) & 0xFF;
         }
         var step = ((clen + 7) >> 3) << 3;       # CMSG_ALIGN to 8 bytes
-        if (step <= 0) { return 0; }
         off = off + step;
     }
     return 0;
 }
 
-# recvmsg-based recv that also surfaces the IPv4 response TTL.
-# Writes the TTL (0..255, or 0 if absent) into *ttl_out and returns
-# the bytes received (or negative errno from the kernel). Caller owns
-# both buffers. msghdr/iov/control are alloc'd per call — the probe
-# loop runs at human cadence so the cost is irrelevant; keeping the
-# call self-contained means probe.cyr doesn't have to thread a recv
-# context struct.
+# The IPv4 TTL (IP_RECVTTL) out of a cmsg buffer. See _lx_cmsg_find.
+fn _lx_cmsg_find_ttl(control, controllen): i64 {
+    return _lx_cmsg_find(control, controllen, _LX_IPPROTO_IP, _LX_IP_TTL);
+}
+
+# The IPv6 hop limit (IPV6_RECVHOPLIMIT) out of a cmsg buffer.
+fn _lx_cmsg_find_hoplimit(control, controllen): i64 {
+    return _lx_cmsg_find(control, controllen, _LX_IPPROTO_IPV6, _LX_IPV6_HOPLIMIT);
+}
+
 # Strip a leading IPv4 header from a SOCK_RAW receive buffer, in place.
 # Returns the new length; returns `n` unchanged when the buffer does not begin
 # with a plausible IPv4 header, so a mis-detection degrades to the old behaviour
@@ -225,26 +288,29 @@ fn _lx_strip_ipv4_header(buf, n, ttl_out): i64 {
     return rem;
 }
 
+# recvmsg into buf with the static msghdr / iovec / cmsg scratch. Returns the
+# byte count (or negative errno) and leaves the kernel's controllen in
+# _lx_mh's msg_controllen slot (+40) for the cmsg walk.
+fn _lx_recvmsg(fd, buf, maxlen): i64 {
+    store64(&_lx_iov,     buf);
+    store64(&_lx_iov + 8, maxlen);
+    memset(&_lx_mh, 0, 56);
+    store64(&_lx_mh + 16, &_lx_iov);  # msg_iov
+    store64(&_lx_mh + 24, 1);         # msg_iovlen
+    store64(&_lx_mh + 32, &_lx_ctl);  # msg_control
+    store64(&_lx_mh + 40, 64);        # msg_controllen
+    return syscall(_LX_SYS_RECVMSG, fd, &_lx_mh, 0);
+}
+
+# recvmsg-based recv that also surfaces the IPv4 response TTL.
+# Writes the TTL (0..255, or 0 if absent) into *ttl_out and returns
+# the bytes received (or negative errno from the kernel). Caller owns
+# both buffers.
 fn platform_icmp_recv_ext(fd, buf, maxlen, ttl_out): i64 {
-    var ctlcap = 64;
-    var ctl    = alloc(ctlcap);
-    var iov    = alloc(16);
-    store64(iov,     buf);
-    store64(iov + 8, maxlen);
-
-    var mh = alloc(56);
-    memset(mh, 0, 56);
-    store64(mh + 16, iov);          # msg_iov
-    store64(mh + 24, 1);            # msg_iovlen
-    store64(mh + 32, ctl);          # msg_control
-    store64(mh + 40, ctlcap);       # msg_controllen
-
-    var n = syscall(_LX_SYS_RECVMSG, fd, mh, 0);
+    var n = _lx_recvmsg(fd, buf, maxlen);
     store64(ttl_out, 0);
     if (n < 0) { _lx_last_recv_err = n; return n; }
-
-    var ctllen = load64(mh + 40);   # kernel writes back actual controllen
-    store64(ttl_out, _lx_cmsg_find_ttl(ctl, ctllen));
+    store64(ttl_out, _lx_cmsg_find_ttl(&_lx_ctl, load64(&_lx_mh + 40)));
 
     # ⛔ SOCK_RAW DELIVERS THE IPv4 HEADER. Per raw(7), an AF_INET SOCK_RAW
     # socket includes the IP header on every packet RECEIVED (unlike sent, which
@@ -270,14 +336,21 @@ fn platform_udp_open(): i64 {
     return syscall(_LX_SYS_SOCKET, _LX_AF_INET, _LX_SOCK_DGRAM, _LX_IPPROTO_UDP);
 }
 
-# sendto over UDP. port is the destination port (e.g. 53 for DNS).
+# Send over UDP to packed_addr:port (e.g. a nameserver on 53). The socket is
+# CONNECTED to that peer first, which is what makes the kernel drop datagrams
+# from anyone else: an unconnected socket accepts a reply from any host that
+# guesses the ephemeral port, so a third party could answer a DNS query (audit
+# finding K; RFC 5452 §9.1). Re-connecting to the same peer on a retry is legal
+# and cheap. Returns bytes sent or a negative errno.
 fn platform_udp_send_to(fd, packed_addr, port, pkt, pkt_len): i64 {
     var sa = _lx_sockaddr_in(packed_addr, port);
-    return syscall(_LX_SYS_SENDTO, fd, pkt, pkt_len, 0, sa, 16);
+    var rc = sys_connect(fd, sa, 16);
+    if (rc < 0) { return rc; }
+    return sys_sendto(fd, pkt, pkt_len, 0, 0, 0);
 }
 
-# recvfrom over UDP. Same shape as platform_icmp_recv — we don't care
-# about the source address, just the payload.
+# Read one datagram from the UDP socket. Because platform_udp_send_to
+# connected it, the kernel has already dropped anything not from that peer.
 fn platform_udp_recv(fd, buf, maxlen): i64 {
     return syscall(_LX_SYS_RECVFROM, fd, buf, maxlen, 0, 0, 0);
 }
@@ -291,9 +364,9 @@ fn platform_udp_recv(fd, buf, maxlen): i64 {
 # (=2). IPV6_RECVHOPLIMIT mirrors IP_RECVTTL: enable it, then recvmsg
 # returns the response hop-limit as an IPV6_HOPLIMIT cmsg.
 
-# Build a sockaddr_in6 (28 bytes) for the given 16-byte IPv6 address
-# (network order, as written by ipv6_parse) and UDP/TCP port (host
-# order; serialized big-endian into sin6_port). Layout:
+# Write a sockaddr_in6 (28 bytes) for the given 16-byte IPv6 address
+# (network order, as written by ipv6_parse) and port (host order;
+# serialized big-endian into sin6_port) into sa. Layout:
 #   off 0-1:   sin6_family   (u16)
 #   off 2-3:   sin6_port     (u16 BE)
 #   off 4-7:   sin6_flowinfo (u32, zero)
@@ -302,8 +375,7 @@ fn platform_udp_recv(fd, buf, maxlen): i64 {
 #
 # scope_id is the interface index for link-local destinations (RFC 4007).
 # 0 means "no zone" — global / loopback addresses don't need one.
-fn _lx_sockaddr_in6(addr16, port, scope_id): i64 {
-    var sa = alloc(28);
+fn _lx_sockaddr_in6_into(sa, addr16, port, scope_id): i64 {
     memset(sa, 0, 28);
     store16(sa, _LX_AF_INET6);
     store8(sa + 2, (port >> 8) & 0xFF);
@@ -333,18 +405,23 @@ fn _lx_enable_recvhoplimit(fd): i64 {
 # Open an ICMPv6 socket. Tries unprivileged SOCK_DGRAM first; falls
 # back to SOCK_RAW. On success, enables IPV6_CHECKSUM + IPV6_RECVHOPLIMIT
 # so the kernel both fills our outbound checksum and surfaces the
-# inbound hop limit to platform_icmp6_recv_ext.
+# inbound hop limit to platform_icmp6_recv_ext. Records which flavour
+# opened: the v6 raw fallback used to leave the mode unset, so the ident
+# check that raw sockets need never ran and --diag said "never opened"
+# (audit findings A, M).
 fn platform_icmp6_open(): i64 {
     var fd = syscall(_LX_SYS_SOCKET, _LX_AF_INET6, _LX_SOCK_DGRAM, _LX_IPPROTO_ICMPV6);
     if (fd >= 0) {
         _lx_enable_ipv6_checksum(fd);
         _lx_enable_recvhoplimit(fd);
+        _lx_icmp_mode = _LX_ICMP_MODE_DGRAM;
         return fd;
     }
     var fd2 = syscall(_LX_SYS_SOCKET, _LX_AF_INET6, _LX_SOCK_RAW, _LX_IPPROTO_ICMPV6);
     if (fd2 >= 0) {
         _lx_enable_ipv6_checksum(fd2);
         _lx_enable_recvhoplimit(fd2);
+        _lx_icmp_mode = _LX_ICMP_MODE_RAW;
     }
     return fd2;
 }
@@ -354,62 +431,27 @@ fn platform_icmp6_open(): i64 {
 # link-local destinations (0 for global / loopback). Returns bytes
 # sent or negative errno.
 fn platform_icmp6_send_to(fd, addr16, scope_id, pkt, pkt_len): i64 {
-    var sa = _lx_sockaddr_in6(addr16, 0, scope_id);
-    var n = syscall(_LX_SYS_SENDTO, fd, pkt, pkt_len, 0, sa, 28);
+    _lx_sockaddr_in6_into(&_lx_sa, addr16, 0, scope_id);
+    var n = syscall(_LX_SYS_SENDTO, fd, pkt, pkt_len, 0, &_lx_sa, 28);
     if (n < 0) { _lx_last_send_err = n; }
     return n;
 }
 
-# Walk a cmsg buffer for the IPv6 hop limit (level=IPPROTO_IPV6,
-# type=IPV6_HOPLIMIT). Same structure walker as _lx_cmsg_find_ttl —
-# kept separate because the (level, type) pair differs and inlining
-# the IPv6 version reads cleaner than parameterizing.
-fn _lx_cmsg_find_hoplimit(control, controllen): i64 {
-    var off = 0;
-    while (off + 16 <= controllen) {
-        var clen  = load64(control + off);
-        if (clen < 16) { return 0; }
-        var level = load32(control + off + 8);
-        var type  = load32(control + off + 12);
-        if (level == _LX_IPPROTO_IPV6 && type == _LX_IPV6_HOPLIMIT) {
-            return load32(control + off + 16) & 0xFF;
-        }
-        var step = ((clen + 7) >> 3) << 3;
-        if (step <= 0) { return 0; }
-        off = off + step;
-    }
-    return 0;
-}
-
 # recvmsg-based recv that also surfaces the IPv6 response hop limit.
-# Same shape as platform_icmp_recv_ext but parses the IPv6 cmsg pair.
+# Same shape as platform_icmp_recv_ext but parses the IPv6 cmsg pair. An
+# IPv6 raw socket carries no IP header, so there is nothing to strip.
 fn platform_icmp6_recv_ext(fd, buf, maxlen, hop_out): i64 {
-    var ctlcap = 64;
-    var ctl    = alloc(ctlcap);
-    var iov    = alloc(16);
-    store64(iov,     buf);
-    store64(iov + 8, maxlen);
-
-    var mh = alloc(56);
-    memset(mh, 0, 56);
-    store64(mh + 16, iov);
-    store64(mh + 24, 1);
-    store64(mh + 32, ctl);
-    store64(mh + 40, ctlcap);
-
-    var n = syscall(_LX_SYS_RECVMSG, fd, mh, 0);
+    var n = _lx_recvmsg(fd, buf, maxlen);
     store64(hop_out, 0);
     if (n < 0) { _lx_last_recv_err = n; return n; }
-
-    var ctllen = load64(mh + 40);
-    store64(hop_out, _lx_cmsg_find_hoplimit(ctl, ctllen));
+    store64(hop_out, _lx_cmsg_find_hoplimit(&_lx_ctl, load64(&_lx_mh + 40)));
     return n;
 }
 
 # Read up to maxlen bytes from path into buf. Returns bytes read on
 # success, negative errno on failure. Used by src/dns.cyr to slurp
-# /etc/resolv.conf. Single read() — fine for resolv.conf, which is
-# always tiny (< 4 KB on real systems).
+# /etc/resolv.conf. Single read() — dns.cyr treats a read that fills the
+# buffer as possibly cut and parses complete lines only.
 fn platform_read_file(path, buf, maxlen): i64 {
     var fd = syscall(_LX_SYS_OPEN, path, _LX_O_RDONLY, 0);
     if (fd < 0) { return fd; }
@@ -422,42 +464,64 @@ fn platform_read_file(path, buf, maxlen): i64 {
 # /etc/resolv.conf. Return 0 so _dns_choose_nameserver falls through to the file.
 fn platform_dns_server(): i64 { return 0; }
 
-# Resolve an interface name (e.g., "lo", "eth0") to its kernel ifindex
-# by reading /sys/class/net/<name>/ifindex (decimal ASCII, trailing
-# newline). Returns the ifindex (≥1) on success, 0 on any failure.
-# Used to fill sin6_scope_id for link-local IPv6 destinations.
+# Parse a decimal interface index of at most 10 digits (u32 range). Returns the
+# value, or 0 for anything else (empty, a non-digit, too long, zero, > u32).
+fn _lx_parse_ifindex(s, n): i64 {
+    if ((n <= 0) || (n > 10)) { return 0; }
+    var v = 0;
+    var i = 0;
+    while (i < n) {
+        var c = load8(s + i);
+        if ((c < 48) || (c > 57)) { return 0; }
+        v = v * 10 + (c - 48);
+        i = i + 1;
+    }
+    if (v > 0xFFFFFFFF) { return 0; }
+    return v;
+}
+
+# Resolve a `%zone` to its kernel ifindex. A numeric zone is the index itself
+# (RFC 4007 §11.2, as getaddrinfo accepts it). A name is looked up in
+# /sys/class/net/<name>/ifindex (decimal ASCII, trailing newline). Returns the
+# ifindex (≥1), or 0 when the zone is not a valid interface name or the lookup
+# fails.
+#
+# The zone comes from argv and is spliced into a path, so it is checked first
+# (audit finding O): 1..15 bytes (IFNAMSIZ - 1, the kernel's own limit) and no
+# '/'. `../../tmp/x` used to read /tmp/x/ifindex. Without a '/', the only other
+# path a name can form is /sys/class/net/../ifindex, which does not exist.
 fn _lx_resolve_ifindex(name): i64 {
     var nlen = strlen(name);
+    if ((nlen <= 0) || (nlen >= _LX_IFNAMSIZ)) { return 0; }
+    var numeric = _lx_parse_ifindex(name, nlen);
+    if (numeric > 0) { return numeric; }
+    var q = 0;
+    while (q < nlen) {
+        if (load8(name + q) == 47) { return 0; }        # '/'
+        q = q + 1;
+    }
+
     var pre  = "/sys/class/net/";
     var suf  = "/ifindex";
     var prelen = strlen(pre);
     var suflen = strlen(suf);
     var pathcap = prelen + nlen + suflen + 1;
-    if (pathcap > 256) { return 0; }
     var path = alloc(pathcap);
-    var i = 0;
-    while (i < prelen) { store8(path + i, load8(pre + i)); i = i + 1; }
-    var j = 0;
-    while (j < nlen)   { store8(path + prelen + j, load8(name + j)); j = j + 1; }
-    var k = 0;
-    while (k < suflen) { store8(path + prelen + nlen + k, load8(suf + k)); k = k + 1; }
+    memcpy(path, pre, prelen);
+    memcpy(path + prelen, name, nlen);
+    memcpy(path + prelen + nlen, suf, suflen);
     store8(path + prelen + nlen + suflen, 0);
 
     var buf = alloc(32);
     var n = platform_read_file(path, buf, 31);
     if (n <= 0) { return 0; }
-
-    # Parse decimal ASCII until non-digit (typically '\n' or NUL).
-    var idx = 0;
-    var p = 0;
-    while (p < n) {
-        var c = load8(buf + p);
+    var d = 0;
+    while (d < n) {
+        var c = load8(buf + d);
         if ((c < 48) || (c > 57)) { break; }
-        idx = idx * 10 + (c - 48);
-        p = p + 1;
+        d = d + 1;
     }
-    if (p == 0) { return 0; }
-    return idx;
+    return _lx_parse_ifindex(buf, d);
 }
 
 # Public wrapper — keeps main.cyr off the _LX_ namespace.
@@ -467,22 +531,110 @@ fn platform_resolve_ifindex(name): i64 {
 
 # Read CLOCK_MONOTONIC and return microseconds since boot.
 fn platform_now_us(): i64 {
-    var ts = alloc(16);
-    syscall(_LX_SYS_CLOCK_GETTIME, _LX_CLOCK_MONOTONIC, ts);
-    var secs = load64(ts);
-    var nsec = load64(ts + 8);
+    syscall(_LX_SYS_CLOCK_GETTIME, _LX_CLOCK_MONOTONIC, &_lx_ts);
+    var secs = load64(&_lx_ts);
+    var nsec = load64(&_lx_ts + 8);
     return secs * 1000000 + nsec / 1000;
 }
 
+# A uniformly random 16-bit value from getrandom(2), for the DNS query ID and
+# the ICMP identifier. If getrandom fails (a pre-3.17 kernel, a seccomp filter)
+# it degrades to the clock, which is predictable but keeps yo working.
+fn platform_random_u16(): i64 {
+    var rb[8];
+    if (sys_getrandom(&rb, 2, 0) == 2) {
+        return ((load8(&rb) << 8) | load8(&rb + 1)) & 0xFFFF;
+    }
+    return platform_now_us() & 0xFFFF;
+}
+
 # nanosleep for ms milliseconds. nanosleep accepts {tv_sec, tv_nsec};
-# pass NULL for the remaining-time output (we don't care about
-# interruptions for inter-packet delay).
+# pass NULL for the remaining-time output. Not interruptible by Ctrl-C (SIGINT
+# is blocked while the probe loop runs) — the loop sleeps with
+# platform_sleep_interruptible instead.
 fn platform_sleep_ms(ms): i64 {
     if (ms <= 0) { return 0; }
-    var ts = alloc(16);
-    store64(ts,     ms / 1000);
-    store64(ts + 8, (ms % 1000) * 1000000);
-    return syscall(_LX_SYS_NANOSLEEP, ts, 0);
+    store64(&_lx_ts,     ms / 1000);
+    store64(&_lx_ts + 8, (ms % 1000) * 1000000);
+    return syscall(_LX_SYS_NANOSLEEP, &_lx_ts, 0);
+}
+
+# Fill the static pollfd pair with fd (if >= 0) and then sigfd (if >= 0), and
+# return how many entries are in use. sigfd, when present, is always the last
+# entry (index nfds - 1); fd, when present, is entry 0.
+fn _lx_poll_setup(fd, sigfd): i64 {
+    var n = 0;
+    if (fd >= 0) {
+        store32(&_lx_pfd, fd);
+        store16(&_lx_pfd + 4, _LX_POLLIN);
+        store16(&_lx_pfd + 6, 0);
+        n = 1;
+    }
+    if (sigfd >= 0) {
+        store32(&_lx_pfd + n * 8, sigfd);
+        store16(&_lx_pfd + n * 8 + 4, _LX_POLLIN);
+        store16(&_lx_pfd + n * 8 + 6, 0);
+        n = n + 1;
+    }
+    return n;
+}
+
+# ppoll the static pollfd pair for up to ms milliseconds.
+fn _lx_ppoll(nfds, ms): i64 {
+    store64(&_lx_ts,     ms / 1000);
+    store64(&_lx_ts + 8, (ms % 1000) * 1000000);
+    return sys_ppoll(&_lx_pfd, nfds, &_lx_ts, 0, 8);
+}
+
+# Drain one queued SIGINT from the signalfd. 1 if one was there.
+fn _lx_drain_sigfd(sigfd): i64 {
+    var n = syscall(_LX_SYS_READ, sigfd, &_lx_sig, _LX_SIGINFO_SIZE);
+    if (n > 0) { return 1; }
+    return 0;
+}
+
+# Wait up to timeout_ms for fd to become readable, or for Ctrl-C on sigfd
+# (pass a negative sigfd when there is no watch). Returns:
+#   1  fd is readable (or has an error to report: the recv that follows says)
+#   2  interrupted — a SIGINT was queued, and has been drained
+#   0  the time ran out, or the wait ended early for nothing (EINTR);
+#      the probe loop recomputes what is left of -W either way. A wait that
+#      ran out records -11 as the last recv error, which is what --diag reads
+#      as "sent, nothing came back within -W" — the blocking recv's
+#      SO_RCVTIMEO used to leave that, and a poll timeout leaves nothing.
+#  <0  a ppoll error
+fn platform_wait_readable(fd, sigfd, timeout_ms): i64 {
+    var nfds = _lx_poll_setup(fd, sigfd);
+    var rc = _lx_ppoll(nfds, timeout_ms);
+    if (rc == _LX_EINTR) { return 0; }
+    if (rc < 0) { return rc; }
+    if (rc == 0) {
+        _lx_last_recv_err = 0 - 11;
+        return 0;
+    }
+    if (sigfd >= 0) {
+        var sre = load16(&_lx_pfd + (nfds - 1) * 8 + 6);
+        if ((sre & _LX_POLLIN) != 0) {
+            if (_lx_drain_sigfd(sigfd) == 1) { return 2; }
+        }
+    }
+    var re = load16(&_lx_pfd + 6);
+    if ((re & (_LX_POLLIN | _LX_POLLERR | _LX_POLLHUP)) != 0) { return 1; }
+    return 0;
+}
+
+# Sleep for ms milliseconds unless Ctrl-C arrives first. Returns 1 when
+# interrupted (the SIGINT is drained), else 0. Without a watch (sigfd < 0) it is
+# a plain nanosleep.
+fn platform_sleep_interruptible(sigfd, ms): i64 {
+    if (ms <= 0) { return platform_check_interrupted(sigfd); }
+    if (sigfd < 0) { platform_sleep_ms(ms); return 0; }
+    var nfds = _lx_poll_setup(0 - 1, sigfd);
+    var rc = _lx_ppoll(nfds, ms);
+    if (rc > 0) {
+        if ((load16(&_lx_pfd + 6) & _LX_POLLIN) != 0) { return _lx_drain_sigfd(sigfd); }
+    }
+    return 0;
 }
 
 # Install Ctrl-C handling via signalfd. Avoids the rt_sigaction +
@@ -491,25 +643,39 @@ fn platform_sleep_ms(ms): i64 {
 #   1. Block SIGINT in this thread via rt_sigprocmask so the kernel
 #      won't deliver it through the default-terminate path.
 #   2. Create a non-blocking signalfd that fires when SIGINT arrives.
-#   3. Caller polls platform_check_interrupted between iterations.
+#   3. The probe loop watches it in every wait (platform_wait_readable,
+#      platform_sleep_interruptible) and checks it between probes.
 #
-# Returns the signalfd (≥0) or the negated errno on failure.
+# Returns the signalfd (≥0) or the negated errno on failure. If signalfd fails,
+# SIGINT is unblocked again so Ctrl-C keeps its default effect — it used to stay
+# blocked, and Ctrl-C did nothing for the rest of the run.
 fn platform_install_interrupt_watch(): i64 {
-    var mask = alloc(8);
-    store64(mask, 1 << (_LX_SIGINT - 1));   # sigset bit for SIGINT
-    syscall(_LX_SYS_RT_SIGPROCMASK, _LX_SIG_BLOCK, mask, 0, 8);
-    return syscall(_LX_SYS_SIGNALFD4, 0 - 1, mask, 8, _LX_SFD_NONBLOCK);
+    store64(&_lx_mask, 1 << (_LX_SIGINT - 1));   # sigset bit for SIGINT
+    syscall(_LX_SYS_RT_SIGPROCMASK, _LX_SIG_BLOCK, &_lx_mask, 0, 8);
+    var fd = syscall(_LX_SYS_SIGNALFD4, 0 - 1, &_lx_mask, 8, _LX_SFD_NONBLOCK);
+    if (fd < 0) {
+        syscall(_LX_SYS_RT_SIGPROCMASK, _LX_SIG_UNBLOCK, &_lx_mask, 0, 8);
+    }
+    return fd;
+}
+
+# Undo platform_install_interrupt_watch: close the signalfd and unblock SIGINT,
+# so outside the probe loop (the next target's DNS, say) Ctrl-C ends the
+# process at once instead of waiting for the next probe loop to notice it.
+fn platform_remove_interrupt_watch(sigfd): i64 {
+    if (sigfd < 0) { return 0; }
+    syscall(_LX_SYS_CLOSE, sigfd);
+    store64(&_lx_mask, 1 << (_LX_SIGINT - 1));
+    syscall(_LX_SYS_RT_SIGPROCMASK, _LX_SIG_UNBLOCK, &_lx_mask, 0, 8);
+    return 0;
 }
 
 # Non-blocking check: returns 1 if a SIGINT has been queued since the
-# last call (drained), 0 if nothing pending. fd ≤ 0 (open failed)
+# last call (drained), 0 if nothing pending. A negative fd (no watch)
 # always returns 0 so probe loops degrade gracefully.
 fn platform_check_interrupted(fd): i64 {
-    if (fd <= 0) { return 0; }
-    var buf = alloc(_LX_SIGINFO_SIZE);
-    var n = syscall(_LX_SYS_READ, fd, buf, _LX_SIGINFO_SIZE);
-    if (n > 0) { return 1; }
-    return 0;
+    if (fd < 0) { return 0; }
+    return _lx_drain_sigfd(fd);
 }
 
 # --- first-fail diagnostics (--diag) ----------------------------------
@@ -580,6 +746,7 @@ fn platform_diag_dump(target, af): i64 {
     # -11 is EAGAIN: SO_RCVTIMEO fired, so the send succeeded and nothing
     # answered in time. That is a genuine network timeout and reads very
     # differently from a local error, so it gets words rather than a number.
+    # (platform_wait_readable records it when a reply wait runs out.)
     if (_lx_last_recv_err == 0) {
         output_diag_kv("last recv       ", "no error recorded");
     }

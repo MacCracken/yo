@@ -6,9 +6,23 @@ deliberately does not check. The answer is different on each of the five reply
 paths, because on three of them the *kernel* has already done the filtering and
 on two of them nobody has.
 
-As of 0.6.0 yo tests **type** always, **seq** always, and **ident** only on the
-SOCK_RAW fallback. It never verifies the received checksum, even though
-`src/icmp.cyr` defines `icmp_verify()` and the suite exercises it.
+As of 0.7.2 the rules live in one pure function, `probe_reply_is_ours`
+(`src/probe.cyr`), unit-tested in `tests/yo.tcyr` (`audit A+G+S`). yo tests:
+- **type** always;
+- **seq** always, as the 16 bits the wire carries (before 0.7.2 the full counter
+  was compared, so every reply from probe 65536 on was rejected);
+- **ident** only on the SOCK_RAW fallback, against an ident that is **random per
+  process** (it was the constant `0x1234`, shared by every yo);
+- the **checksum** only on the IPv4 SOCK_RAW fallback, the one path where the
+  kernel has not already validated it (§ Where checksum verification is redundant).
+
+> **0.7.2 update (P(-1) audit, `docs/audit/2026-11-08-audit.md`, findings A, G,
+> S).** Two of the five paths below were wrong in the 0.6.0 version of this note,
+> which called both RAW rows "correct". On IPv4 RAW the ident was a constant, so
+> two yo processes on raw sockets accepted each other's replies: a dead host
+> probed beside a live one reported `2 received`, exit 0. On IPv6 RAW the mode
+> flag was never set, so the ident was not compared at all. Both are fixed and
+> reproduced in `tests/integration/run.sh`. Line numbers quoted below are 0.6.0's.
 
 > **This note began as a bug report.** Writing it surfaced a defect that had
 > shipped since 0.3.0: the IPv4 `SOCK_RAW` fallback accepted *nothing*, reporting
@@ -117,7 +131,7 @@ RECV n=64 type=129 ident=0x681c seq=7
 
 `0x681c` = 26652.
 
-## Why checksum verification is redundant — per backend
+## Where checksum verification is redundant — per backend
 
 **IPv6.** `src/icmp.cyr:81-85` states the invariant:
 
@@ -157,6 +171,13 @@ Measured indirectly: the received frame above folds to zero under
 `icmp_checksum`, i.e. `icmp_verify` would return 1 — it just would not be telling
 us anything the kernel had not already enforced.
 
+**IPv4 SOCK_RAW — not redundant; verified since 0.7.2.** A raw socket gets its
+copy of an ICMP frame in `raw_local_deliver`, which `ip_protocol_deliver_rcu`
+(net/ipv4/ip_input.c) calls *before* the protocol handler, `icmp_rcv`, checks
+the checksum. So on this path nothing has validated the frame when yo reads it,
+and `probe_reply_is_ours` runs `icmp_verify` over it. The 0.6.0 version of this
+note said the RAW case "duplicates what icmp_rcv did"; it did not.
+
 **AGNOS.** Verification here would be circular. `src/platform_agnos.cyr:59-74`
 (`_ag_icmp_pong`) is the model bridge: `sys_icmp_echo(#55)` is one-shot and
 returns only an RTT, so `recv_ext` manufactures the reply from the request that
@@ -180,9 +201,9 @@ integer.
 | path | ident yo wrote | IP header on rx | who filters | acceptance |
 |---|---|---|---|---|
 | Linux v4 `SOCK_DGRAM` | overwritten with sport | absent (n=64) | kernel, by socket id | correct |
-| Linux v4 `SOCK_RAW` | **preserved** (`0x1234`) | **present (20 B, n=84)** | yo, since 0.6.0 | correct |
+| Linux v4 `SOCK_RAW` | **preserved** (random per process since 0.7.2; was `0x1234`) | **present (20 B, n=84)** | yo: type, seq, ident, checksum | correct since 0.7.2 (0.6.0–0.7.1: cross-talk between yo processes) |
 | Linux v6 `SOCK_DGRAM` | overwritten with sport | absent (n=64) | kernel, by socket id | correct |
-| Linux v6 `SOCK_RAW` | preserved | absent (n=64) | yo, since 0.6.0 | correct |
+| Linux v6 `SOCK_RAW` | preserved (random per process) | absent (n=64) | yo: type, seq, ident; kernel: checksum | correct since 0.7.2 (before: ident never compared) |
 | AGNOS | preserved (yo's own bytes) | n/a — synthesised | n/a | correct, and tautological |
 
 ## The weakest link was worse than cross-talk — FIXED in 0.6.0

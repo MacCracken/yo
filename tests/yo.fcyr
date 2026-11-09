@@ -1,13 +1,244 @@
-# yo fuzz harness
+# yo fuzz harness — every parser that reads bytes yo did not write.
+#
+# Deterministic: a fixed-seed xorshift64 drives FUZZ_ROUNDS rounds, so a failure
+# reproduces exactly. Each round feeds random or structured-random input to:
+#   DNS:     _dns_skip_name, _dns_decode_name, the A / AAAA / PTR parsers,
+#            _dns_question_matches, _dns_resolv_conf_nameserver, _dns_encode_qname
+#   ICMP:    probe_reply_is_ours, _lx_strip_ipv4_header, _lx_cmsg_find
+#   address: ipv6_parse_ex, output_ipv6_to_buf
+# and checks an invariant on each result (bounded lengths, NUL placement, canary
+# bytes past every output buffer untouched). Run it as `cyrius fuzz`, and as
+# `cyrius fuzz --poison`, where the allocator's redzones turn a heap overrun
+# into exit 86. Before 0.7.2 this harness included no yo code at all (audit
+# finding T).
 
-fn fuzz_main(data, len) {
-    if (len == 0) { return 0; }
+include "src/icmp.cyr"
+include "src/cli.cyr"
+include "lib/taar.cyr"
+include "src/ipv6.cyr"
+include "src/stats.cyr"
+include "src/output.cyr"
+include "src/platform.cyr"
+include "src/dns.cyr"
+include "src/probe.cyr"
+
+var FUZZ_ROUNDS = 20000;
+var _fz_state = 0x9E3779B97F4A7C15;
+var _fz_fail = 0;
+
+# xorshift64: the next pseudo-random 63-bit value.
+fn fz_next(): i64 {
+    var x = _fz_state;
+    x = x ^ (x << 13);
+    x = x ^ ((x >> 7) & 0x01FFFFFFFFFFFFFF);
+    x = x ^ (x << 17);
+    _fz_state = x;
+    return x & 0x7FFFFFFFFFFFFFFF;
+}
+
+# A pseudo-random value in [0, n).
+fn fz_below(n): i64 { return fz_next() % n; }
+
+# Fill n random bytes.
+fn fz_bytes(buf, n): i64 {
+    var i = 0;
+    while (i < n) { store8(buf + i, fz_below(256)); i = i + 1; }
     return 0;
 }
 
+# Fill n bytes drawn from the alphabet a (alen bytes long).
+fn fz_from(buf, n, a, alen): i64 {
+    var i = 0;
+    while (i < n) { store8(buf + i, load8(a + fz_below(alen))); i = i + 1; }
+    return 0;
+}
+
+# Record a failed invariant (round, check id) and keep going.
+fn fz_check(ok, round, id): i64 {
+    if (ok == 0) {
+        if (_fz_fail < 10) {
+            sys_write(2, "fuzz: invariant ", 16);
+            fmt_int(id);
+            sys_write(2, " failed at round ", 17);
+            fmt_int(round);
+            var lf[8];
+            store8(&lf, 10);
+            sys_write(2, &lf, 1);
+        }
+        _fz_fail = _fz_fail + 1;
+    }
+    return 0;
+}
+
+# 1 when buf[from, to) all still hold 0xA5.
+fn fz_canary(buf, from, to): i64 {
+    var i = from;
+    while (i < to) {
+        if (load8(buf + i) != 0xA5) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# A DNS message with a plausible header (QR=1, RCODE 0, small counts) over a
+# random body, so the walkers get past the header checks and into the records.
+fn fz_dns_msg(buf, len): i64 {
+    fz_bytes(buf, len);
+    if (len >= 12) {
+        store8(buf + 2, 0x81); store8(buf + 3, 0x80);
+        store8(buf + 4, 0); store8(buf + 5, fz_below(3));
+        store8(buf + 6, 0); store8(buf + 7, 1 + fz_below(4));
+        # Some label lengths and pointers, where the question would start.
+        var k = 12;
+        while (k < len) {
+            var r = fz_below(8);
+            if (r == 0) { store8(buf + k, 0xC0); }
+            if (r == 1) { store8(buf + k, fz_below(64)); }
+            if (r == 2) { store8(buf + k, 0); }
+            k = k + 1 + fz_below(6);
+        }
+    }
+    return len;
+}
+
+# A valid PTR response for 1.1.1.1 (qid) whose answer is one label of `len`
+# bytes, each a random printable-ish or control byte. Returns its length.
+fn fz_ptr_resp(buf, qid, len): i64 {
+    var n = _dns_build_ptr_query(buf, qid, 0x01010101);
+    store8(buf + 2, 0x81); store8(buf + 3, 0x80);
+    store8(buf + 7, 1);
+    store8(buf + n, 0xC0); store8(buf + n + 1, 0x0C);
+    store8(buf + n + 2, 0); store8(buf + n + 3, 12);
+    store8(buf + n + 4, 0); store8(buf + n + 5, 1);
+    store8(buf + n + 6, 0); store8(buf + n + 7, 0); store8(buf + n + 8, 0); store8(buf + n + 9, 60);
+    store8(buf + n + 10, 0); store8(buf + n + 11, len + 2);
+    store8(buf + n + 12, len);
+    var i = 0;
+    while (i < len) {
+        var c = 97 + fz_below(26);                              # mostly letters ...
+        if (fz_below(8) == 0) { c = fz_below(256); }            # ... with a random byte now and then
+        if (c == 0) { c = 27; }                                 # (a NUL would end the decoded string early)
+        store8(buf + n + 13 + i, c);
+        i = i + 1;
+    }
+    store8(buf + n + 13 + len, 0);
+    return n + 14 + len;
+}
+
+# FUZZ_ROUNDS rounds over every parser; returns the number of failed invariants.
+fn fuzz_main(): i64 {
+    var msg = alloc(600);
+    var out = alloc(300);
+    var txt = alloc(700);
+    var q = alloc(600);
+    var v6 = alloc(32);
+    var zone = alloc(80);
+    var ctl = alloc(80);
+    var ttl = alloc(8);
+    var name_ab = "abcdefgh0123-_.";
+    var conf_ab = "nameserver 0123456789.:#abcdef\t\r\n ";
+    var v6_ab = "0123456789abcdefABCDEF:.%lo";
+    var round = 0;
+    while (round < FUZZ_ROUNDS) {
+        # --- DNS name walkers on random bytes at random offsets ---
+        var len = fz_below(520);
+        fz_dns_msg(msg, len);
+        var off = 0;
+        if (len > 0) { off = fz_below(len); }
+        var sk = _dns_skip_name(msg, len, off);
+        fz_check((sk == DNS_FAIL) || ((sk > off) && (sk <= len)), round, 1);
+        var cap = 1 + fz_below(260);
+        memset(out, 0xA5, 300);
+        var dn = _dns_decode_name(msg, len, off, out, cap);
+        fz_check((dn == DNS_FAIL) || ((dn >= 0) && (dn < cap) && (load8(out + dn) == 0)), round, 2);
+        fz_check(fz_canary(out, cap, 300), round, 3);
+
+        # --- the record parsers ---
+        var qid = (load8(msg) << 8) | load8(msg + 1);
+        if (len < 2) { qid = 0; }
+        var a = _dns_parse_response(msg, len, qid);
+        fz_check((a == DNS_FAIL) || ((a >= 0) && (a <= 0xFFFFFFFF)), round, 4);
+        memset(v6, 0xA5, 32);
+        var aaaa = _dns_parse_aaaa_response(msg, len, qid, v6);
+        fz_check((aaaa == DNS_FAIL) || (aaaa == 0), round, 5);
+        fz_check(fz_canary(v6, 16, 32), round, 6);
+        memset(out, 0xA5, 300);
+        var pn = _dns_parse_ptr_response(msg, len, qid, out, 256);
+        fz_check((pn == DNS_FAIL) || ((pn > 0) && (pn < 256) && (_dns_name_is_hostname(out, pn) == 1)), round, 7);
+        fz_check(fz_canary(out, 256, 300), round, 8);
+        var qm = _dns_question_matches(msg, len, msg, fz_below(len + 1));
+        fz_check((qm == 0) || (qm == 1), round, 9);
+
+        # --- a well-formed PTR answer whose name is random bytes: accepted only
+        #     when it is a hostname (the banner prints it) ---
+        var pl = 1 + fz_below(40);
+        var pq = 0x1000 + fz_below(0xE000);
+        var plen = fz_ptr_resp(msg, pq, pl);
+        memset(out, 0xA5, 300);
+        var pr = _dns_parse_ptr_response(msg, plen, pq, out, 256);
+        fz_check((pr == DNS_FAIL) || ((pr == pl) && (_dns_name_is_hostname(out, pr) == 1)), round, 21);
+        fz_check((pr != DNS_FAIL) || (_dns_name_is_hostname(msg + plen - pl - 1, pl) == 0), round, 22);
+
+        # --- hostname encoding never writes past 255 ---
+        var hl = fz_below(600);
+        fz_from(txt, hl, name_ab, 15);
+        store8(txt + hl, 0);
+        memset(q, 0xA5, 600);
+        var en = _dns_encode_qname(txt, q);
+        fz_check((en == DNS_FAIL) || ((en > 0) && (en <= DNS_MAX_NAME)), round, 10);
+        fz_check(fz_canary(q, DNS_MAX_NAME, 600), round, 11);
+
+        # --- resolv.conf text ---
+        var cl = fz_below(300);
+        fz_from(txt, cl, conf_ab, 35);
+        var ns = _dns_resolv_conf_nameserver(txt, cl);
+        fz_check((ns >= DNS_RESOLV_UNUSABLE) && (ns <= 0xFFFFFFFF), round, 12);
+        var cut = _dns_resolv_complete_len(txt, cl, 1 + fz_below(300));
+        fz_check((cut >= 0) && (cut <= cl), round, 13);
+
+        # --- IPv6 literals ---
+        var vl = fz_below(60);
+        fz_from(txt, vl, v6_ab, 27);
+        store8(txt + vl, 0);
+        memset(zone, 0xA5, 80);
+        var zl = ipv6_parse_ex(txt, v6, zone, 64);
+        fz_check((zl == IPV6_PARSE_FAIL) || ((zl >= 0) && (zl < 60)), round, 14);
+        fz_check(fz_canary(zone, 64, 80), round, 15);
+        memset(out, 0xA5, 300);
+        fz_bytes(v6, 16);
+        var ol = output_ipv6_to_buf(v6, out);
+        fz_check((ol >= 2) && (ol <= 39) && (load8(out + ol) == 0), round, 16);
+        fz_check(fz_canary(out, 46, 300), round, 17);
+
+        # --- ICMP frames ---
+        var fl = fz_below(200);
+        fz_bytes(msg, fl);
+        if ((fl > 0) && (fz_below(2) == 0)) { store8(msg, 0x45); }
+        store64(ttl, 0);
+        var sl = _lx_strip_ipv4_header(msg, fl, ttl);
+        fz_check((sl >= 0) && (sl <= fl), round, 18);
+        var ours = probe_reply_is_ours(msg, sl, fz_below(2), fz_next(), fz_below(65536), fz_below(2), fz_below(2));
+        fz_check((ours == 0) || (ours == 1), round, 19);
+
+        # --- cmsg chains ---
+        fz_bytes(ctl, 80);
+        if (fz_below(2) == 0) { store64(ctl, 16 + fz_below(48)); }
+        var cv = _lx_cmsg_find(ctl, fz_below(65), fz_below(3), fz_below(60));
+        fz_check((cv >= 0) && (cv <= 255), round, 20);
+
+        round = round + 1;
+    }
+    return _fz_fail;
+}
+
+# Run the harness; exit 1 on any failed invariant.
 fn main() {
     alloc_init();
-    fuzz_main("test", 4);
+    var fails = fuzz_main();
+    if (fails > 0) {
+        sys_write(2, "fuzz: FAILED\n", 13);
+        return 1;
+    }
     println("fuzz: ok");
     return 0;
 }

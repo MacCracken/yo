@@ -40,6 +40,26 @@ fn _emit_lf(fd): i64 {
     return 0;
 }
 
+# Is `target` a literal of the family that `forced` (4 or 6) rules out? Prints
+# the error and returns 1 if so. v6buf / zone_buf are main's scratch.
+fn _main_af_mismatch(target, forced, v6buf, zone_buf): i64 {
+    var fam = ipv6_literal_family(target, v6buf, zone_buf);
+    if ((forced == 4) && (fam == 6)) {
+        _eputs("yo: -4 given, but this is an IPv6 address: ");
+        _eputs(target);
+        _emit_lf(2);
+        return 1;
+    }
+    if ((forced == 6) && (fam == 4)) {
+        _eputs("yo: -6 given, but this is an IPv4 address: ");
+        _eputs(target);
+        _emit_lf(2);
+        return 1;
+    }
+    return 0;
+}
+
+# Parse argv, then resolve and probe each target in turn. Returns the exit code.
 fn main() {
     alloc_init();
     args_init();
@@ -50,10 +70,21 @@ fn main() {
     var rc = cli_parse_argv(reg, ac, av);
 
     if (rc == CLI_HELP)               { cli_print_help(reg); return 0; }
-    if (rc == CLI_ERR_PARSE)          { _eputs("yo: bad option\n");          cli_print_usage(2); return 2; }
+    if (rc == CLI_ERR_PARSE)          { cli_print_parse_error(reg);          cli_print_usage(2); return 2; }
     if (rc == CLI_ERR_NEGATIVE)       { _eputs("yo: negative value\n");      cli_print_usage(2); return 2; }
     if (rc == CLI_ERR_MISSING_TARGET) { _eputs("yo: missing target host\n"); cli_print_usage(2); return 2; }
-    if (rc == CLI_ERR_AF_CONFLICT)    { _eputs("yo: -4 and -6 are mutually exclusive\n"); cli_print_usage(2); return 2; }
+    if (rc == CLI_ERR_AF_CONFLICT) {
+        _eputs("yo: -4 and -6 are mutually exclusive\n");
+        cli_print_usage(2);
+        return 2;
+    }
+    if (rc == CLI_ERR_RANGE) {
+        _eputs("yo: ");
+        _eputs(cli_range_message());
+        _emit_lf(2);
+        cli_print_usage(2);
+        return 2;
+    }
 
     # Aggregate exit code across all positional targets:
     #   0 if any target received at least one reply
@@ -66,6 +97,14 @@ fn main() {
     # `-4` restricts to {ipv4_parse, dns_resolve (A)}. `-6` restricts
     # to {ipv6_parse, dns_resolve_aaaa}. Reverse DNS path matches the
     # winning family (in-addr.arpa for v4, ip6.arpa for v6).
+    #
+    # A literal of the other family than -4 / -6 asks for is an error, at once:
+    # it used to fall through to DNS as a hostname and fail ~4 s later with
+    # "cannot resolve host" (audit finding P). An IPv4-mapped literal
+    # (`::ffff:a.b.c.d`) is an IPv4 endpoint, so -6 refuses it too.
+    #
+    # Ctrl-C during a target's probe loop ends the run after that target's
+    # summary (probe_interrupted); it used to end only the current target.
     var parens_buf = alloc(256);
     var v6buf      = alloc(16);
     var v6resolved = alloc(16);
@@ -87,6 +126,21 @@ fn main() {
         var parens   = 0;
 
         # Literal IPv4 — only if not forcing v6.
+        if (force_v6 == 1) {
+            if (_main_af_mismatch(target, 6, v6buf, zone_buf) == 1) {
+                any_error = 1;
+                i = i + 1;
+                continue;
+            }
+        }
+        if (force_v4 == 1) {
+            if (_main_af_mismatch(target, 4, v6buf, zone_buf) == 1) {
+                any_error = 1;
+                i = i + 1;
+                continue;
+            }
+        }
+
         if (force_v6 == 0) {
             var v4 = ipv4_parse(target);
             if (v4 >= 0) {
@@ -188,6 +242,7 @@ fn main() {
           );
         if (rrc == 0) { any_reply = 1; }
         if (rrc == 2) { any_error = 1; }
+        if (probe_interrupted() == 1) { break; }
         i = i + 1;
     }
 

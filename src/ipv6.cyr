@@ -242,6 +242,20 @@ fn ipv6_is_v4_mapped(addr16): i64 {
     return 1;
 }
 
+# Which address family is `s` a literal of? 4 for a dotted quad or an
+# IPv4-mapped IPv6 literal (`::ffff:a.b.c.d` is an IPv4 endpoint), 6 for any
+# other IPv6 literal (with or without a %zone), 0 when it is no literal (a
+# hostname). v6buf (16 B) and zone_buf (64 B) are caller scratch. main uses it
+# to refuse a literal of the family -4 / -6 rules out (audit finding P).
+fn ipv6_literal_family(s, v6buf, zone_buf): i64 {
+    if (ipv4_parse(s) >= 0) { return 4; }
+    if (ipv6_parse_ex(s, v6buf, zone_buf, 64) >= 0) {
+        if (ipv6_is_v4_mapped(v6buf) == 1) { return 4; }
+        return 6;
+    }
+    return 0;
+}
+
 # Parse the IPv6 literal pointed at by `s` into 16 packed bytes at `out`.
 # Rejects scope-id suffix — use ipv6_parse_ex when scope-ids matter.
 # Returns IPV6_PARSE_OK / IPV6_PARSE_FAIL. `out` must be ≥ 16 bytes.

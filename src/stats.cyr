@@ -14,6 +14,7 @@
 var STATS_SIZE      = 40;
 var STATS_MIN_UNSET = 0 - 1;  # i64 sentinel; no real RTT can be negative.
 
+# A fresh, zeroed accumulator (STATS_SIZE bytes).
 fn stats_new(): i64 {
     var s = alloc(STATS_SIZE);
     store64(s,      0);
@@ -45,10 +46,15 @@ fn stats_record_loss(s): i64 {
     return 0;
 }
 
+# Probes sent (replied or lost).
 fn stats_sent(s):    i64 { return load64(s); }
+# Replies received.
 fn stats_recv(s):    i64 { return load64(s + 8); }
+# Fastest RTT, us (STATS_MIN_UNSET until a reply).
 fn stats_min_us(s):  i64 { return load64(s + 16); }
+# Slowest RTT, us.
 fn stats_max_us(s):  i64 { return load64(s + 24); }
+# Sum of RTTs, us (for the mean).
 fn stats_sum_us(s):  i64 { return load64(s + 32); }
 
 # Whole-percent loss. Returns 0 when nothing was sent (the only sane

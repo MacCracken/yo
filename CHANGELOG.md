@@ -4,6 +4,154 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-11-08
+
+A P(-1) review of everything yo ships found 25 issues: 1 high, 9 medium, 11 low
+and 4 info. All are fixed. The full report, with the method, the reproductions
+and the deferred items, is
+[`docs/audit/2026-11-08-audit.md`](docs/audit/2026-11-08-audit.md). The letters
+below are its finding IDs.
+
+### Security
+
+- **A dead host could read as alive on the SOCK_RAW fallback (A, high).** Two
+  things let one yo accept another yo's replies. The ICMP ident was the constant
+  `0x1234` in every yo process. On IPv6 the raw-socket mode was never recorded,
+  so the ident was not compared at all. A black-hole host probed beside a live
+  one therefore reported `2 received` and exit 0: 6 of 6 runs on 0.7.1, over
+  IPv4 and IPv6. The ident is now random per process, and both opens record
+  their mode.
+- **Hostname heap overflow from argv (B).** The encoded name had a per-label cap
+  but no total cap, and it was written into a 512-byte buffer. The 255-byte
+  limit is now checked before each byte is stored.
+- **PTR names are printed only when they are hostnames (C).** A reverse-zone
+  answer could carry ESC sequences or CR/LF into the banner. Names outside
+  letters, digits, `-`, `_` and `.` are now dropped, as glibc's `res_hnok` drops
+  them.
+- **AGNOS: `-s` 2041 and up overran a 2048-byte global (D).** It is now refused
+  with EMSGSIZE. The QEMU smoke checks this.
+- **A resolv.conf that names only unusable resolvers fails closed (I).** For
+  example, IPv6-only servers used to send every lookup to 1.1.1.1. A file that
+  names no server still falls back.
+- **DNS replies have to come from the server and echo the question (K).** The
+  changes:
+  - Linux connects the UDP socket;
+  - AGNOS drops other sources;
+  - the query ID comes from `getrandom`;
+  - the question section is checked;
+  - only class-IN answers count.
+- **CI supply chain (J).** Actions are SHA-pinned, and checkout no longer
+  persists credentials. The installer is fetched at the pinned cyrius tag. The
+  token is read-only except in the release job.
+
+### Fixed
+
+- **`-W 0` waited forever, and Ctrl-C was slow (E).** Ctrl-C could not interrupt
+  a reply wait or an interval sleep: 0.7.1 took 9.0 s with `-i 10000` and 4.4 s
+  with `-W 5000`. Both waits now `ppoll` on the socket and the signalfd, and
+  Ctrl-C lands within a millisecond. A probe also now waits at most `-W`; the
+  old worst case on a busy raw socket was about 2×`-W`.
+- **Memory grew about 410 B per probe, without bound (F).** 0.7.1 reached
+  28.9 MB of peak RSS at 60,000 probes. Peak RSS is now flat at about 13 MB.
+- **Sequence numbers past 65535 (G).** Every reply from probe 65536 on was
+  rejected; the comparison now uses the 16 bits on the wire.
+- **`-s` too large (H).** `-s 70000` printed "timeout" for each probe; `-s` past
+  2 GiB crashed.
+- **Send failures were printed as "timeout" (L).**
+- **`--diag` (M).** It said "never opened" for an IPv6 socket, and it carried one
+  target's facts into the next.
+- **resolv.conf parsing (N).** CRLF files never parsed, and a file over 4 KB
+  could be cut mid-address.
+- **`%zone` (O).** It was put into a `/sys` path unchecked, so `../` worked.
+  Numeric zones now work.
+- **Wrong-family literals (P).** `-4 ::1` used to try DNS and fail after about
+  4 s.
+- **`--help` (Q).** The option rows went to stderr.
+- **AGNOS details (R).** A Linux-only hint printed on AGNOS, and the result of
+  `getrandom` was unchecked.
+- **The SOCK_RAW checksum is verified (S).** A raw socket receives before
+  `icmp_rcv` checks it.
+- **cmsg records are bounds-checked (V).**
+
+### Changed — visible to scripts
+
+- **Values out of range exit 2, and the message names the flag.** That covers
+  `-W 0`, `-W` or `-i` over 2147483647 ms, and `-s` over 65507.
+- **`-4` with an IPv6 literal, or `-6` with an IPv4 or IPv4-mapped one, exits 2
+  at once.**
+- **Ctrl-C ends the whole run** after the current target's summary. It used to
+  end only the current target.
+- **`--help` prints entirely on stdout,** and the help text states the ranges.
+- **A failed send prints `seq=N  send failed: -101 ENETUNREACH`,** where it
+  printed `timeout`.
+- **A bad option names the token:** `yo: unknown option: --bogus`.
+- **Everything else is byte-identical to 0.7.1,** with RTT values masked: the
+  15-case output comparison, exit codes included.
+
+### Tests and CI
+
+- **Unit tests: 386 → 483 assertions.** The DNS guards were written failing-first:
+  15 went red against 0.7.1. All **37** new guards are mutation-checked; removing
+  any one turns a suite red.
+- **`tests/yo.fcyr` is a real fuzz harness.** It was a stub that included no yo
+  code. Now it runs 20,000 deterministic rounds over every byte parser, checks 22
+  invariants, and runs in CI both plain and under `cyrius fuzz --poison`.
+- **New `tests/integration/run.sh` and `fake_dns.py`.** The harness runs the
+  binary in a fresh network and mount namespace, with a fake DNS server and a
+  trap on 1.1.1.1. It has 28 checks: 0.7.2 passes all 28, and the 0.7.1 binary
+  fails 18. CI runs it under `sudo unshare`; that path has not yet run on
+  GitHub.
+- **CI also runs `cyrius audit`** (fmt, lint, docs). It is clean; the audit
+  started from 8 lint warnings and 46 undocumented functions.
+- **`tests/yo.bcyr` has three more rows.** They cover reply acceptance with the
+  checksum, the PTR hostname check, and the question echo. The existing rows are
+  unchanged within noise.
+- **`scripts/agnos-qemu-smoke.sh` is hardened.**
+  - Each image step is checked.
+  - QEMU's output is logged instead of discarded.
+  - It runs `python3 -I`.
+  - The QMP socket path is short.
+  - A lock stops two runs clobbering each other.
+  - It adds the `-s 3000` check.
+
+  It passes: 2/2 replies, EMSGSIZE at `-s 3000`, no kernel fault.
+
+### Refactored
+
+- **One `_dns_exchange`** replaces four copies of the resolve loop.
+- **One cmsg walker.**
+- **Shared header builders.**
+- **Static scratch buffers** on the per-probe path.
+- **`ipv6_literal_family`**, a new pure helper.
+- **`probe_reply_is_ours`**, which carries the reply-acceptance rules as a pure
+  function.
+
+### Documentation
+
+- **New audit report:** `docs/audit/2026-11-08-audit.md`.
+- **`roadmap.md` is reorganised.**
+  - Shipped history is removed; this file holds it.
+  - Open work runs 0.8.x (backend parity) → 0.9.x (Linux completeness) → 0.10.x
+    (behaviour decisions, then the surface freeze), followed by the 1.0 criteria
+    and a trigger-gated v1 backlog.
+  - Every deferred audit item is on it.
+- **Architecture note 001.** It called both RAW reply paths "correct" and RAW
+  checksum verification redundant; both claims are corrected.
+- **Other corrections:**
+  - the diagnosing guide;
+  - CLAUDE.md's buffer rule: a bare `var a[N]` is N × 8 bytes at module scope;
+  - the README's `-W 2` example, which meant 2 ms;
+  - stale source headers.
+
+### Size
+
+- **x86_64:** 191,784 → 200,936 B by default, and 77,096 → 86,248 B under
+  `CYRIUS_DCE=1`.
+- **AGNOS:** 206,368 → 215,144 B, and 84,072 B under DCE.
+- **The growth is about 9 KB of live code:** the poll-based waits, the help rows
+  and the DNS checks.
+- **Per invocation:** 448–449 µs against 444–445 µs for 0.7.1.
+
 ## [0.7.1] - 2026-11-08
 
 ### Changed

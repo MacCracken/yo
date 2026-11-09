@@ -9,6 +9,11 @@ on:
   # the CI gate before publishing a release.
   workflow_call:
 
+# Read-only by default. Nothing in CI writes to the repository; release.yml grants
+# write to its release job alone.
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -18,7 +23,9 @@ jobs:
     name: Build & Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1 (SHA-pinned)
+        with:
+          persist-credentials: false
 
       - name: Install Cyrius toolchain
         run: |
@@ -31,7 +38,10 @@ jobs:
           # `|| true` masked a 404'd release asset → a silent 0s no-op).
           CYRIUS_VERSION="$(grep '^cyrius = ' cyrius.cyml | head -1 | sed 's/cyrius = "\(.*\)"/\1/')"
           echo "Installing Cyrius $CYRIUS_VERSION"
-          curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
+          # The installer is taken at the pinned tag, not cyrius `main`: it is the
+          # code that verifies the release tarball's checksum and Ed25519
+          # signature, so an unpinned copy could skip all of it.
+          curl -sSf "https://raw.githubusercontent.com/MacCracken/cyrius/${CYRIUS_VERSION}/scripts/install.sh" | \
             CYRIUS_VERSION="$CYRIUS_VERSION" sh
           echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
 
@@ -58,6 +68,12 @@ jobs:
         # binary is a host build, so every assertion runs against the Linux arm.
         run: cyrius build --agnos src/main.cyr build/${{ github.event.repository.name }}-agnos
 
+      - name: Cleanliness (cyrius audit)
+        # fmt, lint and doc-coverage gates over src/ and tests/ (plus a test and
+        # bench pass). Nothing gated these before 0.7.2, and the P(-1) audit
+        # found 8 lint warnings and 46 undocumented functions; it exits 1 on any.
+        run: cyrius audit
+
       - name: Test
         # v5.6.28: bare `cyrius test` picks up the [build].test entry
         # AND auto-discovers tests/*.tcyr — avoids the previous
@@ -74,6 +90,19 @@ jobs:
         run: |
           cyrius bench
           cyrius fuzz
+          # --poison: redzones around every allocation, so a heap overrun in a
+          # parser exits 86 instead of passing silently (it is how the qname
+          # overflow fixed in 0.7.2 would have shown up).
+          cyrius fuzz --poison
+
+      - name: Integration (network namespace)
+        # Runs the built binary end to end inside a fresh network + mount
+        # namespace: the SOCK_RAW fallback, Ctrl-C, RSS over a long run, and DNS
+        # against a fake server (tests/integration/run.sh). The runner restricts
+        # unprivileged user namespaces, so the script uses `sudo unshare`;
+        # YO_REQUIRE_NETNS=1 makes "could not enter a namespace" a failure, not
+        # a silent skip.
+        run: YO_REQUIRE_NETNS=1 bash tests/integration/run.sh
 
       # NOTE: scripts/agnos-qemu-smoke.sh is deliberately NOT run here. It needs
       # sibling checkouts (agnos, gnoboot, agnoshi) plus QEMU + OVMF, which a

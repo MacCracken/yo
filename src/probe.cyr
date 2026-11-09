@@ -1,11 +1,18 @@
 # probe.cyr — the actual ICMP probe loop.
 #
-# Ties together: src/platform.cyr (socket I/O + clock + sleep),
-# src/icmp.cyr (RFC 792 framing + RFC 1071 checksum), src/stats.cyr
-# (RTT accumulator), src/output.cyr (per-packet + summary printing).
+# Ties together: src/platform.cyr (socket I/O + clock + waits), src/icmp.cyr
+# (RFC 792 framing + RFC 1071 checksum), src/stats.cyr (RTT accumulator),
+# src/output.cyr (per-packet + summary printing).
 #
 # Exit code matches POSIX ping: 0 if at least one reply, 1 if all
 # packets lost, 2 if the socket couldn't even open.
+
+# Set by probe_run when Ctrl-C ended its loop. main stops the run there rather
+# than moving on to the next target (audit finding E): the old loop consumed
+# the interrupt for one target and carried on with the rest.
+var _probe_interrupted = 0;
+# 1 when Ctrl-C ended the last probe_run's loop.
+fn probe_interrupted(): i64 { return _probe_interrupted; }
 
 # Build a deterministic filler payload of `n` bytes. Sequential 0..255
 # wrap pattern — same as iputils-ping. Caller owns the buffer.
@@ -16,6 +23,31 @@ fn _probe_fill_payload(buf, n): i64 {
         i = i + 1;
     }
     return 0;
+}
+
+# Is the n-byte frame at rx the echo reply to probe `seq`? Pure, so the rules
+# are unit-tested rather than read off the loop:
+#   - at least an ICMP header, of the expected reply type;
+#   - seq matches as the 16 bits the wire carries — the counter is an i64, and
+#     comparing it whole rejected every reply from probe 65536 on (finding G);
+#   - on the SOCK_RAW fallback (`raw` 1) the ident must be ours too: a raw socket
+#     sees every echo reply on the host, and yo's ident is random per process,
+#     where it used to be a constant shared by every yo (finding A);
+#   - `verify` 1 also checks the RFC 1071 checksum. IPv4 raw sockets get their
+#     copy before icmp_rcv validates it; ping sockets and IPv6 raw sockets do not.
+# On SOCK_DGRAM the kernel has matched the socket's own id, and rewritten ident
+# to it, so `raw` is 0 there.
+fn probe_reply_is_ours(rx, n, expected_type, seq, ident, raw, verify): i64 {
+    if (n < ICMP_HEADER_LEN) { return 0; }
+    if (icmp_type(rx) != expected_type) { return 0; }
+    if (icmp_seq(rx) != (seq & 0xFFFF)) { return 0; }
+    if (raw == 1) {
+        if (icmp_ident(rx) != (ident & 0xFFFF)) { return 0; }
+    }
+    if (verify == 1) {
+        if (icmp_verify(rx, n) == 0) { return 0; }
+    }
+    return 1;
 }
 
 # Run the full probe sequence. Returns the process exit code.
@@ -34,41 +66,62 @@ fn _probe_fill_payload(buf, n): i64 {
 # packet was lost. It is deliberately NOT gated on `quiet` — `-q --diag`
 # is the shape you want when scripting a health check, and suppressing
 # the reason along with the per-packet chatter would defeat the flag.
-fn probe_run(target_cstr, af, addr_arg, scope_id, banner_parens, count, timeout_ms, interval_ms, size, quiet, diag): i64 {
+#
+# Waiting (audit finding E). Each probe waits for a reply with
+# platform_wait_readable against an absolute -W deadline, and the gap between
+# probes is platform_sleep_interruptible. Both also watch the SIGINT signalfd,
+# so Ctrl-C ends the run within a poll wake-up rather than after the current
+# wait: SIGINT is blocked for signalfd, so it could interrupt neither the old
+# blocking recvmsg (with SO_RCVTIMEO) nor nanosleep — `-i 10000` took 8.5 s to
+# notice it. The absolute deadline also bounds a probe at -W: re-arming a full
+# SO_RCVTIMEO per non-matching frame let a busy raw socket wait up to ~2×-W.
+fn probe_run(target_cstr, af, addr_arg, scope_id, banner_parens,
+  count, timeout_ms, interval_ms, size, quiet, diag): i64 {
+    _probe_interrupted = 0;
+    platform_diag_reset();
     var fd = 0;
     if (af == 6) { fd = platform_icmp6_open(); }
     else         { fd = platform_icmp_open(); }
     if (fd < 0) {
-        var msg = "yo: cannot open ICMP socket — try adjusting /proc/sys/net/ipv4/ping_group_range or run with CAP_NET_RAW\n";
-        sys_write(2, msg, strlen(msg));
+        platform_icmp_open_hint(af);
         if (diag == 1) { platform_diag_dump(target_cstr, af); }
         return 2;
     }
     platform_set_recv_timeout_ms(fd, timeout_ms);
 
-    var payload = alloc(size);
-    _probe_fill_payload(payload, size);
+    # alloc(0) is 0 by contract, and -s 0 is a valid probe: give the payload one
+    # byte of room so a zero pointer only ever means "out of memory".
+    var payload = alloc(size + 1);
     var pkt = alloc(ICMP_HEADER_LEN + size);
-    # rx buf: ICMP header + max payload + slack for any IP/extension
-    # bytes the kernel might surface even on SOCK_DGRAM (it doesn't,
-    # but slack is cheap).
+    # rx buf: ICMP header + payload + 60 for a maximal IPv4 header on the raw
+    # path (it arrives in front of the ICMP message) + 4 slack.
     var rxcap = ICMP_HEADER_LEN + size + 64;
     var rxbuf = alloc(rxcap);
+    var ttl_slot = alloc(8);
+    if ((payload == 0) || (pkt == 0) || (rxbuf == 0) || (ttl_slot == 0)) {
+        var oom = "yo: out of memory\n";
+        sys_write(2, oom, strlen(oom));
+        platform_close(fd);
+        return 2;
+    }
+    _probe_fill_payload(payload, size);
 
-    # Ident is arbitrary on SOCK_DGRAM (kernel rewrites it with the
-    # socket-table-managed ID). We still set something deterministic
-    # in case the SOCK_RAW fallback is in play, where ident is ours.
-    var ident = 0x1234;
+    # Ident is ours only on the SOCK_RAW fallback (SOCK_DGRAM replaces it with the
+    # socket-managed id). Random per process, so two yo processes on raw sockets
+    # stop accepting each other's replies (finding A).
+    var ident = platform_random_u16();
+    var raw = platform_icmp_raw_mode();
+    var verify = 0;
+    if ((raw == 1) && (af == 4)) { verify = 1; }
 
     var s = stats_new();
     if (quiet == 0) { output_banner(target_cstr, banner_parens, size); }
 
     var sigfd = platform_install_interrupt_watch();
-    var ttl_slot = alloc(8);
 
     var seq = 0;
     while (seq < count) {
-        if (platform_check_interrupted(sigfd) == 1) { break; }
+        if (platform_check_interrupted(sigfd) == 1) { _probe_interrupted = 1; break; }
 
         var pkt_len = 0;
         if (af == 6) { pkt_len = icmp6_build_echo_request(pkt, ident, seq, payload, size); }
@@ -80,8 +133,9 @@ fn probe_run(target_cstr, af, addr_arg, scope_id, banner_parens, count, timeout_
         else         { sent = platform_icmp_send_to (fd, addr_arg, pkt, pkt_len); }
 
         if (sent < 0) {
+            # Not a timeout: the packet never left. Say why (finding L).
             stats_record_loss(s);
-            if (quiet == 0) { output_timeout(seq); }
+            if (quiet == 0) { output_send_error(seq, sent); }
         } else {
             # Accept an echo reply for our family, SKIPPING frames that are not
             # one, until the -W deadline.
@@ -89,9 +143,7 @@ fn probe_run(target_cstr, af, addr_arg, scope_id, banner_parens, count, timeout_
             # ⛔ THE SKIP IS LOAD-BEARING ON SOCK_RAW, NOT DEFENSIVE. A raw ICMP
             # socket is not demultiplexed by the kernel: it sees every matching
             # frame on the host, INCLUDING yo's own outbound echo request. On
-            # loopback that request arrives ahead of the reply, and the previous
-            # single-shot recv spent the probe's one read on it — so the real
-            # reply was never read and a live host scored a timeout. Reading until
+            # loopback that request arrives ahead of the reply, so reading until
             # something matches (or the deadline passes) is what makes the RAW
             # fallback behave like the DGRAM path, where the kernel already did
             # this filtering. On DGRAM the first frame matches and the loop exits
@@ -99,40 +151,32 @@ fn probe_run(target_cstr, af, addr_arg, scope_id, banner_parens, count, timeout_
             var expected_reply = ICMP_ECHO_REPLY;
             if (af == 6) { expected_reply = ICMPV6_ECHO_REPLY; }
             var deadline_us = t0 + timeout_ms * 1000;
-            var n = 0;
             var t1 = t0;
             var got = 0;
             var scanning = 1;
             while (scanning == 1) {
-                if (af == 6) { n = platform_icmp6_recv_ext(fd, rxbuf, rxcap, ttl_slot); }
-                else         { n = platform_icmp_recv_ext (fd, rxbuf, rxcap, ttl_slot); }
-                t1 = platform_now_us();
-                # A short read or a negative return is the timeout / error exit.
-                if (n < ICMP_HEADER_LEN) { scanning = 0; }
+                var left_ms = (deadline_us - platform_now_us() + 999) / 1000;
+                if (left_ms <= 0) { scanning = 0; }
                 if (scanning == 1) {
-                    if (icmp_type(rxbuf) == expected_reply) {
-                        # `seq` survives on every path: the kernel rewrites ident
-                        # on SOCK_DGRAM but never seq, and _ag_icmp_pong echoes
-                        # the stored request. Matching it catches a LATE reply
-                        # from probe n-1 arriving during probe n, which would
-                        # otherwise be timed against the wrong t0 and report a
-                        # nonsense RTT.
-                        var is_ours = 1;
-                        if (icmp_seq(rxbuf) != seq) { is_ours = 0; }
-                        # `ident` is only ours on the RAW fallback — SOCK_DGRAM
-                        # replaces it with the socket-managed id, so comparing it
-                        # there would reject every genuine reply.
-                        if (platform_icmp_raw_mode() == 1) {
-                            if (icmp_ident(rxbuf) != ident) { is_ours = 0; }
+                    var w = platform_wait_readable(fd, sigfd, left_ms);
+                    if (w == 2) { _probe_interrupted = 1; scanning = 0; }
+                    if (w < 0) { scanning = 0; }
+                    # w == 0: timed out, or woken for nothing — the loop head
+                    # recomputes what is left of -W and ends when it is gone.
+                    if (w == 1) {
+                        var n = 0;
+                        if (af == 6) { n = platform_icmp6_recv_ext(fd, rxbuf, rxcap, ttl_slot); }
+                        else         { n = platform_icmp_recv_ext (fd, rxbuf, rxcap, ttl_slot); }
+                        t1 = platform_now_us();
+                        # A negative return is the timeout / error exit (on AGNOS,
+                        # icmp_echo's own timeout arrives here as -11).
+                        if (n < 0) { scanning = 0; }
+                        if (n >= 0) {
+                            if (probe_reply_is_ours(rxbuf, n, expected_reply, seq, ident, raw, verify) == 1) {
+                                got = 1;
+                                scanning = 0;
+                            }
                         }
-                        if (is_ours == 1) {
-                            got = 1;
-                            scanning = 0;
-                        }
-                    }
-                    if (scanning == 1) {
-                        # Not ours. Keep reading while -W has budget left.
-                        if (t1 >= deadline_us) { scanning = 0; }
                     }
                 }
             }
@@ -142,14 +186,19 @@ fn probe_run(target_cstr, af, addr_arg, scope_id, banner_parens, count, timeout_
                 if (quiet == 0) { output_reply(seq, load64(ttl_slot), rtt); }
             } else {
                 stats_record_loss(s);
-                if (quiet == 0) { output_timeout(seq); }
+                if (quiet == 0) {
+                    if (_probe_interrupted == 0) { output_timeout(seq); }
+                }
             }
         }
 
+        if (_probe_interrupted == 1) { break; }
         seq = seq + 1;
         if (seq < count) {
-            if (platform_check_interrupted(sigfd) == 1) { break; }
-            platform_sleep_ms(interval_ms);
+            if (platform_sleep_interruptible(sigfd, interval_ms) == 1) {
+                _probe_interrupted = 1;
+                break;
+            }
         }
     }
 
@@ -158,7 +207,7 @@ fn probe_run(target_cstr, af, addr_arg, scope_id, banner_parens, count, timeout_
         if (stats_recv(s) == 0) { platform_diag_dump(target_cstr, af); }
     }
     platform_close(fd);
-    if (sigfd > 0) { platform_close(sigfd); }
+    platform_remove_interrupt_watch(sigfd);
 
     if (stats_recv(s) > 0) { return 0; }
     return 1;

@@ -9,6 +9,7 @@ include "src/stats.cyr"
 include "src/output.cyr"
 include "src/platform.cyr"
 include "src/dns.cyr"
+include "src/probe.cyr"
 
 # Format us into a stack buf, NUL-terminate, return the buf pointer
 # so streq can compare against an expected cstring.
@@ -30,6 +31,63 @@ fn _mk_argv(a0, a1, a2, a3, a4, a5, a6, a7): i64 {
     return av;
 }
 
+# Build an n-char hostname of 63-char 'x' labels joined by '.', NUL-terminated.
+# n chars encode to n + 2 bytes (each '.' becomes a length byte, plus the
+# leading length byte and the terminator), so 253 chars is the 255-byte limit.
+fn _mk_long_name(buf, n): i64 {
+    var i = 0;
+    while (i < n) {
+        if ((i % 64) == 63) { store8(buf + i, 46); } else { store8(buf + i, 120); }
+        i = i + 1;
+    }
+    store8(buf + n, 0);
+    return buf;
+}
+
+# 1 when every byte in buf[from, to) still holds `fill`.
+fn _canary_intact(buf, from, to, fill): i64 {
+    var i = from;
+    while (i < to) {
+        if (load8(buf + i) != fill) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# A PTR response for 1.1.1.1 (qid) whose answer is one label of `len` bytes.
+# Returns the response length.
+fn _mk_ptr_resp(buf, qid, label, len): i64 {
+    var n = _dns_build_ptr_query(buf, qid, 0x01010101);   # 38 bytes
+    store8(buf + 2, 0x81); store8(buf + 3, 0x80);           # QR=1 RD RA, RCODE 0
+    store8(buf + 7, 1);                                     # ANCOUNT = 1
+    store8(buf + n, 0xC0); store8(buf + n + 1, 0x0C);       # owner: ptr to qname
+    store8(buf + n + 2, 0); store8(buf + n + 3, 12);        # TYPE PTR
+    store8(buf + n + 4, 0); store8(buf + n + 5, 1);         # CLASS IN
+    store8(buf + n + 6, 0); store8(buf + n + 7, 0); store8(buf + n + 8, 0); store8(buf + n + 9, 60);
+    store8(buf + n + 10, 0); store8(buf + n + 11, len + 2); # RDLENGTH
+    store8(buf + n + 12, len);
+    memcpy(buf + n + 13, label, len);
+    store8(buf + n + 13 + len, 0);
+    return n + 14 + len;
+}
+
+# An A response (qid) for foo.bar whose one answer is 127.0.0.1 in `class`.
+# 12 header + 9 qname + 4 + 16 answer = 41 bytes.
+fn _mk_a_resp(buf, qid, class): i64 {
+    _dns_build_query(buf, qid, "foo.bar", DNS_TYPE_A);
+    store8(buf + 2, 0x81); store8(buf + 3, 0x80);
+    store8(buf + 7, 1);
+    var o = 25;
+    store8(buf + o, 0xC0); store8(buf + o + 1, 0x0C);
+    store8(buf + o + 2, 0); store8(buf + o + 3, 1);         # TYPE A
+    store8(buf + o + 4, (class >> 8) & 0xFF); store8(buf + o + 5, class & 0xFF);
+    store8(buf + o + 6, 0); store8(buf + o + 7, 0); store8(buf + o + 8, 0); store8(buf + o + 9, 60);
+    store8(buf + o + 10, 0); store8(buf + o + 11, 4);
+    store8(buf + o + 12, 127); store8(buf + o + 13, 0); store8(buf + o + 14, 0); store8(buf + o + 15, 1);
+    return o + 16;
+}
+
+# Every unit-test group in order; returns the failure count (clamped to 1 below).
 fn main() {
     alloc_init();
 
@@ -1117,6 +1175,328 @@ fn main() {
     # Unknown interface → 0 (open fails). Long random name to avoid
     # collision with a real iface on developer boxes.
     assert_eq(platform_resolve_ifindex("yo-nope-xyzzy-2026"), 0, "unknown → 0");
+
+    # =====================================================================
+    # 0.7.2 audit (docs/audit/2026-11-08-audit.md). Each group names the
+    # finding it pins; each guard it covers was mutation-checked.
+    # =====================================================================
+
+    # ----- B: a hostname's encoded form is capped at 255 bytes -----
+    test_group("audit B: qname length cap");
+
+    var ln = alloc(2100);
+    _mk_long_name(ln, 253);
+    var lq = alloc(300);
+    assert_eq(_dns_encode_qname(ln, lq), 255, "253-char name encodes to exactly 255 bytes");
+    _mk_long_name(ln, 254);
+    assert(_dns_encode_qname(ln, lq) < 0, "254-char name (256 encoded) rejected");
+
+    # The cap must stop the WRITE, not just the verdict: a 2000-char name into a
+    # 300-byte buffer leaves every byte from 255 on untouched.
+    _mk_long_name(ln, 2000);
+    memset(lq, 0xAA, 300);
+    assert(_dns_encode_qname(ln, lq) < 0, "2000-char name rejected");
+    assert_eq(_canary_intact(lq, 255, 300, 0xAA), 1, "nothing written at or past byte 255");
+
+    # And through the full query builder, which owns a 512-byte buffer.
+    var bigq = alloc(600);
+    memset(bigq, 0xAA, 600);
+    assert(_dns_build_query(bigq, 0x1234, ln, DNS_TYPE_A) < 0, "build_query refuses the long name");
+    assert_eq(_canary_intact(bigq, 12 + 255, 600, 0xAA), 1, "query buffer not overrun");
+
+    # ----- C: a PTR name is printed, so it must be a hostname -----
+    test_group("audit C: PTR name must be a hostname");
+
+    var pzr = alloc(128);
+    var pzo = alloc(64);
+    var esc = alloc(8);
+    store8(esc, 27); store8(esc + 1, 91); store8(esc + 2, 51); store8(esc + 3, 49);
+    store8(esc + 4, 109); store8(esc + 5, 10);                     # ESC [ 3 1 m LF
+    var pzl = _mk_ptr_resp(pzr, 0x4321, esc, 6);
+    assert(_dns_parse_ptr_response(pzr, pzl, 0x4321, pzo, 64) < 0, "ESC sequence + LF in a PTR rejected");
+    pzl = _mk_ptr_resp(pzr, 0x4321, "a b", 3);
+    assert(_dns_parse_ptr_response(pzr, pzl, 0x4321, pzo, 64) < 0, "space in a PTR rejected");
+    pzl = _mk_ptr_resp(pzr, 0x4321, "ab\r", 3);
+    assert(_dns_parse_ptr_response(pzr, pzl, 0x4321, pzo, 64) < 0, "CR in a PTR rejected");
+    pzl = _mk_ptr_resp(pzr, 0x4321, "_srv-01", 7);
+    assert_eq(_dns_parse_ptr_response(pzr, pzl, 0x4321, pzo, 64), 7, "LDH + underscore accepted");
+    assert_eq(streq(pzo, "_srv-01"), 1, "accepted name decoded intact");
+
+    # ----- K: only class-IN answers are addresses -----
+    test_group("audit K: answer class must be IN");
+
+    var cr = alloc(64);
+    var crl = _mk_a_resp(cr, 0x2468, 1);
+    assert_eq(_dns_parse_response(cr, crl, 0x2468), 0x7F000001, "class IN A record accepted");
+    crl = _mk_a_resp(cr, 0x2468, 3);                                # CHAOS
+    assert(_dns_parse_response(cr, crl, 0x2468) < 0, "class CH A record rejected");
+
+    # ----- I, N: resolv.conf naming only unusable servers fails closed -----
+    test_group("audit I+N: resolv.conf fail-closed + CRLF");
+
+    var rf1 = "nameserver fe80::1\n";
+    assert_eq(_dns_resolv_conf_nameserver(rf1, strlen(rf1)), DNS_RESOLV_UNUSABLE, "v6-only file → unusable, not FAIL");
+    var rf2 = "nameserver 10.0.0.1x\n";
+    assert_eq(_dns_resolv_conf_nameserver(rf2, strlen(rf2)), DNS_RESOLV_UNUSABLE, "garbage value → unusable");
+    var rf3 = "search lan\noptions ndots:1\n";
+    assert_eq(_dns_resolv_conf_nameserver(rf3, strlen(rf3)), DNS_FAIL, "no nameserver line → FAIL (fallback allowed)");
+    var rf4 = "nameserver 1.2.3.4\r\n";
+    assert_eq(_dns_resolv_conf_nameserver(rf4, strlen(rf4)), 0x01020304, "CRLF line parses");
+    var rf5 = "nameserver fe80::1\r\nnameserver 9.9.9.9\r\n";
+    assert_eq(_dns_resolv_conf_nameserver(rf5, strlen(rf5)), 0x09090909, "usable server after an unusable one");
+
+    # ----- K: the DNS socket hears only the server it asked -----
+    test_group("audit K: DNS replies only from the server");
+
+    var gsrv = sys_socket(2, 2, 17);                               # AF_INET, SOCK_DGRAM, UDP
+    var gatk = sys_socket(2, 2, 17);
+    var gsa = _lx_sockaddr_in(0x7F000001, 0);
+    assert_eq(sys_bind(gsrv, gsa, 16), 0, "fake server binds 127.0.0.1:0");
+    var gname = alloc(16);
+    var gnlen = alloc(8);
+    store32(gnlen, 16);
+    sys_getsockname(gsrv, gname, gnlen);
+    var gport = (load8(gname + 2) << 8) | load8(gname + 3);
+    var gcli = platform_udp_open();
+    platform_set_recv_timeout_ms(gcli, 300);
+    assert_eq(platform_udp_send_to(gcli, 0x7F000001, gport, "q", 1), 1, "query sent");
+    var gfrom = alloc(16);
+    var gfl = alloc(8);
+    store32(gfl, 16);
+    var grb = alloc(64);
+    sys_recvfrom(gsrv, grb, 64, 0, gfrom, gfl);                    # learns the client's port
+    sys_sendto(gatk, "forged", 6, 0, gfrom, 16);                   # a third party, first
+    sys_sendto(gsrv, "real", 4, 0, gfrom, 16);                     # then the server
+    var ggot = alloc(64);
+    assert_eq(platform_udp_recv(gcli, ggot, 64), 4, "the reply read is the server's 4 bytes");
+    assert_eq(load8(ggot), 114, "and it starts 'r', not the forged 'f'");
+    platform_close(gcli);
+    sys_close(gsrv);
+    sys_close(gatk);
+
+    # ----- K: the reply's question must echo ours -----
+    test_group("audit K: question echo");
+
+    var qq = alloc(64);
+    var qql = _dns_build_query(qq, 0x2468, "foo.bar", DNS_TYPE_A);  # 25 bytes
+    var qr = alloc(64);
+    var qrl = _mk_a_resp(qr, 0x2468, 1);
+    assert_eq(_dns_question_matches(qr, qrl, qq, qql), 1, "echoed question matches");
+    store8(qr + 13, 70);                                            # 'F'
+    assert_eq(_dns_question_matches(qr, qrl, qq, qql), 1, "name compared case-insensitively");
+    store8(qr + 14, 98);                                            # "fbo.bar"
+    assert_eq(_dns_question_matches(qr, qrl, qq, qql), 0, "different name rejected");
+    qrl = _mk_a_resp(qr, 0x2468, 1);
+    store8(qr + 22, 28);                                            # QTYPE AAAA
+    assert_eq(_dns_question_matches(qr, qrl, qq, qql), 0, "different QTYPE rejected");
+    qrl = _mk_a_resp(qr, 0x2468, 1);
+    store8(qr + 24, 3);                                             # QCLASS CH
+    assert_eq(_dns_question_matches(qr, qrl, qq, qql), 0, "different QCLASS rejected");
+    qrl = _mk_a_resp(qr, 0x2468, 1);
+    store8(qr + 5, 2);                                              # QDCOUNT 2
+    assert_eq(_dns_question_matches(qr, qrl, qq, qql), 0, "QDCOUNT other than 1 rejected");
+    qrl = _mk_a_resp(qr, 0x1357, 1);
+    assert_eq(_dns_question_matches(qr, qrl, qq, qql), 0, "different ID rejected");
+    qrl = _mk_a_resp(qr, 0x2469, 1);
+    assert_eq(_dns_question_matches(qr, qrl, qq, qql), 0, "ID differing in the low byte only rejected");
+    qrl = _mk_a_resp(qr, 0x2468, 1);
+    assert_eq(_dns_question_matches(qr, 20, qq, qql), 0, "reply shorter than the question rejected");
+
+    # ----- I, N: the nameserver decision -----
+    test_group("audit I+N: resolver choice");
+
+    assert_eq(_dns_resolv_choose(0x08080808, 0), 0x08080808, "a usable server wins");
+    assert_eq(_dns_resolv_choose(DNS_FAIL, 0), DNS_FALLBACK_NS, "no server named → fallback");
+    assert_eq(_dns_resolv_choose(DNS_RESOLV_UNUSABLE, 0), DNS_FAIL, "only unusable servers → fail closed");
+    assert_eq(_dns_resolv_choose(DNS_FAIL, 1), DNS_FAIL, "cut-off file with nothing usable → fail closed");
+    assert_eq(_dns_resolv_choose(0x08080808, 1), 0x08080808, "cut-off file with a usable server → that server");
+    var cl = "nameserver 1.1.1.1\nnameserver 10.0.0.1";
+    assert_eq(_dns_resolv_complete_len(cl, 30, 4096), 30, "short read parsed whole");
+    assert_eq(_dns_resolv_complete_len(cl, 30, 30), 19, "full read cut back to the last newline");
+    assert_eq(_dns_resolv_complete_len("nameserver", 10, 10), 0, "full read with no newline → nothing");
+
+    # ----- K: AGNOS peer filter (pure, shared) + query ID -----
+    test_group("audit K: peer match + query ID");
+
+    var pf = alloc(16);
+    store64(pf, 0x0A000001); store64(pf + 8, 53);
+    assert_eq(platform_peer_match(pf, 0x0A000001, 53), 1, "datagram from the peer accepted");
+    assert_eq(platform_peer_match(pf, 0x0A000002, 53), 0, "other source address dropped");
+    assert_eq(platform_peer_match(pf, 0x0A000001, 5353), 0, "other source port dropped");
+    assert_eq(platform_peer_match(pf, 0x0A000002, 0), 1, "nothing sent yet → accept");
+    var qidv = _dns_new_qid();
+    assert((qidv >= 0) && (qidv <= 0xFFFF), "query ID is 16 bits");
+
+    # ----- A, G, S: which frames count as the reply -----
+    test_group("audit A+G+S: reply acceptance");
+
+    var ra = alloc(64);
+    var rpl = alloc(16);
+    _probe_fill_payload(rpl, 16);
+    var ral = icmp_build_echo_request(ra, 0xBEEF, 7, rpl, 16);
+    store8(ra, ICMP_ECHO_REPLY);
+    store8(ra + 2, 0); store8(ra + 3, 0);
+    var rck = icmp_checksum(ra, ral);
+    store8(ra + 2, (rck >> 8) & 0xFF); store8(ra + 3, rck & 0xFF);
+    assert_eq(probe_reply_is_ours(ra, ral, ICMP_ECHO_REPLY, 7, 0xBEEF, 0, 0), 1, "DGRAM: matching reply accepted");
+    assert_eq(probe_reply_is_ours(ra, ral, ICMP_ECHO_REPLY, 7, 0x1111, 0, 0), 1, "DGRAM: ident not compared");
+    assert_eq(probe_reply_is_ours(ra, ral, ICMP_ECHO_REPLY, 8, 0xBEEF, 0, 0), 0, "other seq rejected");
+    assert_eq(probe_reply_is_ours(ra, ral, ICMPV6_ECHO_REPLY, 7, 0xBEEF, 0, 0), 0, "other type rejected");
+    assert_eq(probe_reply_is_ours(ra, 7, ICMP_ECHO_REPLY, 7, 0xBEEF, 0, 0), 0, "short frame rejected");
+    assert_eq(probe_reply_is_ours(ra, ral, ICMP_ECHO_REPLY, 7, 0xBEEF, 1, 1), 1,
+        "RAW: our ident + good checksum accepted");
+    assert_eq(probe_reply_is_ours(ra, ral, ICMP_ECHO_REPLY, 7, 0x1234, 1, 0), 0,
+        "RAW: another process's ident rejected");
+    # G: probe 65536 + 7 goes out as seq 7; its reply must still be ours.
+    assert_eq(probe_reply_is_ours(ra, ral, ICMP_ECHO_REPLY, 65536 + 7, 0xBEEF, 0, 0), 1,
+        "seq compared as 16 bits (65543 → 7)");
+    # S: a raw IPv4 reply with a bad checksum is not trusted.
+    store8(ra + 20, load8(ra + 20) ^ 0xFF);
+    assert_eq(probe_reply_is_ours(ra, ral, ICMP_ECHO_REPLY, 7, 0xBEEF, 1, 1), 0, "RAW v4: corrupted reply rejected");
+    assert_eq(probe_reply_is_ours(ra, ral, ICMP_ECHO_REPLY, 7, 0xBEEF, 1, 0), 1, "checksum checked only when asked");
+
+    # ----- E, H: the CLI's upper bounds and -W >= 1 -----
+    test_group("audit E+H: CLI ranges");
+
+    var hr = cli_new();
+    assert_eq(cli_parse_argv(hr, 4, _mk_argv("yo", "-W", "0", "h", 0, 0, 0, 0)), CLI_ERR_RANGE, "-W 0 rejected");
+    hr = cli_new();
+    assert_eq(cli_parse_argv(hr, 4, _mk_argv("yo", "-W", "1", "h", 0, 0, 0, 0)), CLI_OK, "-W 1 accepted");
+    hr = cli_new();
+    assert_eq(cli_parse_argv(hr, 4, _mk_argv("yo", "-W", "2147483647", "h", 0, 0, 0, 0)), CLI_OK,
+        "-W at the max accepted");
+    hr = cli_new();
+    assert_eq(cli_parse_argv(hr, 4, _mk_argv("yo", "-W", "2147483648", "h", 0, 0, 0, 0)), CLI_ERR_RANGE,
+        "-W past the max rejected");
+    hr = cli_new();
+    assert_eq(cli_parse_argv(hr, 4, _mk_argv("yo", "-i", "2147483648", "h", 0, 0, 0, 0)), CLI_ERR_RANGE,
+        "-i past the max rejected");
+    hr = cli_new();
+    assert_eq(cli_parse_argv(hr, 4, _mk_argv("yo", "-i", "0", "h", 0, 0, 0, 0)), CLI_OK, "-i 0 still accepted");
+    hr = cli_new();
+    assert_eq(cli_parse_argv(hr, 4, _mk_argv("yo", "-s", "65507", "h", 0, 0, 0, 0)), CLI_OK, "-s 65507 accepted");
+    hr = cli_new();
+    assert_eq(cli_parse_argv(hr, 4, _mk_argv("yo", "-s", "65508", "h", 0, 0, 0, 0)), CLI_ERR_RANGE,
+        "-s 65508 rejected");
+    assert_eq(streq(cli_range_message(), "-s/--size must be at most 65507 bytes"), 1, "range message names the flag");
+    hr = cli_new();
+    assert_eq(cli_parse_argv(hr, 5, _mk_argv("yo", "-h", "-W", "0", "h", 0, 0, 0)), CLI_HELP,
+        "--help still wins over a range error");
+
+    # ----- E: waits wake on Ctrl-C -----
+    test_group("audit E: interruptible waits");
+
+    var ew = platform_udp_open();                                  # nothing will ever arrive on it
+    var esig = platform_install_interrupt_watch();
+    assert(esig >= 0, "signalfd watch installed");
+    var et0 = platform_now_us();
+    platform_diag_reset();
+    assert_eq(platform_wait_readable(ew, esig, 60), 0, "a quiet wait times out (0)");
+    assert_eq(_lx_last_recv_err, 0 - 11, "...and records -11 for --diag's timeout line");
+    assert((platform_now_us() - et0) >= 50000, "...after roughly its timeout");
+    sys_kill(sys_getpid(), 2);                                     # SIGINT to ourselves (blocked → queued)
+    et0 = platform_now_us();
+    assert_eq(platform_wait_readable(ew, esig, 5000), 2, "SIGINT ends a 5 s reply wait (2)");
+    assert((platform_now_us() - et0) < 1000000, "...within a second, not at -W");
+    sys_kill(sys_getpid(), 2);
+    et0 = platform_now_us();
+    assert_eq(platform_sleep_interruptible(esig, 5000), 1, "SIGINT ends a 5 s interval sleep");
+    assert((platform_now_us() - et0) < 1000000, "...within a second");
+    assert_eq(platform_sleep_interruptible(esig, 30), 0, "an undisturbed sleep reports no interrupt");
+    assert_eq(platform_check_interrupted(esig), 0, "the drained SIGINTs are gone");
+    platform_remove_interrupt_watch(esig);
+    platform_close(ew);
+
+    # ----- F: the per-probe paths allocate nothing -----
+    test_group("audit F: per-probe paths allocate nothing");
+
+    var fpair = alloc(8);
+    sys_socketpair(1, 2, 0, fpair);                                # AF_UNIX, SOCK_DGRAM
+    var fpa = load32(fpair);
+    var fpb = load32(fpair + 4);
+    var fsend = platform_udp_open();
+    var fbuf = alloc(64);
+    var fttl = alloc(8);
+    var fu0 = alloc_used();
+    var fi = 0;
+    while (fi < 200) {
+        sys_write(fpb, "datagram", 8);
+        platform_now_us();
+        platform_icmp_send_to(fsend, 0x7F000001, fbuf, 8);
+        platform_wait_readable(fpa, 0 - 1, 0);
+        platform_icmp_recv_ext(fpa, fbuf, 64, fttl);
+        platform_sleep_interruptible(0 - 1, 0);
+        platform_check_interrupted(0 - 1);
+        fi = fi + 1;
+    }
+    assert_eq(alloc_used() - fu0, 0, "200 probe iterations allocated 0 bytes");
+    platform_close(fsend);
+    sys_close(fpa);
+    sys_close(fpb);
+
+    # ----- O: %zone is checked before it becomes a path -----
+    test_group("audit O: zone validation");
+
+    assert_eq(platform_resolve_ifindex("../../tmp/x"), 0, "'..' path segments rejected");
+    assert_eq(platform_resolve_ifindex("../net/lo"), 0, "'/' rejected (../net/lo would reach lo's ifindex)");
+    assert_eq(platform_resolve_ifindex("abcdefghijklmnop"), 0, "16-byte name (> IFNAMSIZ-1) rejected");
+    assert_eq(platform_resolve_ifindex("1"), 1, "numeric zone is the index (RFC 4007 §11.2)");
+    assert_eq(platform_resolve_ifindex("4294967296"), 0, "numeric zone past u32 rejected");
+    assert_eq(platform_resolve_ifindex("lo"), 1, "named zone still resolves");
+
+    # ----- V: a cmsg record is read only when long enough -----
+    test_group("audit V: cmsg record length");
+
+    var vc = alloc(48);
+    memset(vc, 0, 48);
+    store64(vc, 16);                                               # header only, no int payload
+    store32(vc + 8, _LX_IPPROTO_IP); store32(vc + 12, _LX_IP_TTL);
+    store32(vc + 16, 77);                                          # bytes past the record
+    assert_eq(_lx_cmsg_find_ttl(vc, 48), 0, "16-byte TTL record carries no TTL");
+    store64(vc, 40);                                               # claims more than controllen
+    assert_eq(_lx_cmsg_find_ttl(vc, 32), 0, "record running past controllen ignored");
+    store64(vc, 20);
+    assert_eq(_lx_cmsg_find_ttl(vc, 24), 77, "a whole record still reads");
+
+    # ----- P: a literal of the family -4 / -6 rules out -----
+    test_group("audit P: literal address family");
+
+    var pv6 = alloc(16);
+    var pzb = alloc(64);
+    assert_eq(ipv6_literal_family("192.0.2.1", pv6, pzb), 4, "dotted quad → 4");
+    assert_eq(ipv6_literal_family("::1", pv6, pzb), 6, "IPv6 literal → 6");
+    assert_eq(ipv6_literal_family("fe80::1%lo", pv6, pzb), 6, "IPv6 with zone → 6");
+    assert_eq(ipv6_literal_family("::ffff:192.0.2.1", pv6, pzb), 4, "IPv4-mapped → 4");
+    assert_eq(ipv6_literal_family("example.com", pv6, pzb), 0, "hostname → 0");
+
+    # ----- E, M: the watch is undone, and diag state starts clean -----
+    test_group("audit E+M: watch removal + diag reset");
+
+    var mw = platform_install_interrupt_watch();
+    platform_remove_interrupt_watch(mw);
+    var mold = alloc(8);
+    store64(mold, 0);
+    syscall(_LX_SYS_RT_SIGPROCMASK, _LX_SIG_BLOCK, 0, mold, 8);  # read the mask, change nothing
+    assert_eq(load64(mold) & 2, 0, "SIGINT unblocked after the watch is removed");
+    _lx_last_send_err = 0 - 101;
+    _lx_last_recv_err = 0 - 11;
+    _lx_icmp_mode = _LX_ICMP_MODE_RAW;
+    platform_diag_reset();
+    assert_eq(_lx_last_send_err, 0, "diag reset clears the last send error");
+    assert_eq(_lx_last_recv_err, 0, "diag reset clears the last recv error");
+    assert_eq(_lx_icmp_mode, _LX_ICMP_MODE_NONE, "diag reset clears the socket mode");
+    var m6 = platform_icmp6_open();
+    if (m6 >= 0) {
+        assert(_lx_icmp_mode != _LX_ICMP_MODE_NONE, "an opened v6 ICMP socket records its mode");
+        platform_close(m6);
+    }
+
+    # ----- L: send failures are named -----
+    test_group("audit L: send-error names");
+
+    assert_eq(streq(_output_errno_name(0 - 101), "ENETUNREACH"), 1, "-101 → ENETUNREACH");
+    assert_eq(streq(_output_errno_name(0 - 90), "EMSGSIZE"), 1, "-90 → EMSGSIZE");
+    assert_eq(_output_errno_name(0 - 999), 0, "unknown errno → no name");
 
     return assert_summary();
 }

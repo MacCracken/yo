@@ -8,7 +8,8 @@
 # evidence it ever worked is two manual iron burns in agnos's CHANGELOG (1.45.16:
 # `yo google.com` 2/4 = 50% loss, RX-ring overflow; 1.51.7 on 2026-07-02: 4/4 at
 # 0% loss). Manual burns are not a regression gate — nothing catches a break
-# between them. This is that gate: the last open item in roadmap.md § 0.6.x.
+# between them. This is that gate. It is manual (roadmap.md § 0.8.x weighs running
+# it in CI).
 #
 # HOW IT DRIVES THE SHELL. agnos has NO serial RX path — console input comes from
 # `kbd_read_blocking` (kernel/core/syscall.cyr), a USB-keyboard read. So
@@ -52,7 +53,7 @@ skip() { echo "SKIP: $*"; exit 0; }
 fail() { echo "  FAIL: $*"; rc=1; }
 pass() { echo "  PASS: $*"; }
 
-for tool in qemu-system-x86_64 parted mformat mmd mcopy sgdisk mkfs.ext2 dd tr python3; do
+for tool in qemu-system-x86_64 parted mformat mmd mcopy sgdisk mkfs.ext2 dd tr python3 flock mktemp; do
     command -v "$tool" >/dev/null 2>&1 || skip "required tool '$tool' not on PATH"
 done
 
@@ -98,6 +99,11 @@ echo "  host ICMP    : gid=$MYGID vs ping_group_range='$PGR' -> slirp_icmp=$SLIR
 echo ""
 
 WORK="$ROOT/build/agnos-smoke"
+mkdir -p "$ROOT/build"
+# One run at a time: the work directory is fixed and wiped below, so a second
+# concurrent run would delete the first one's image under its QEMU.
+exec 9>"$ROOT/build/agnos-smoke.lock"
+flock -n 9 || skip "another agnos-qemu-smoke run holds $ROOT/build/agnos-smoke.lock"
 rm -rf "$WORK"; mkdir -p "$WORK"
 IMG="$WORK/agnos-yo.img"
 SEED="$WORK/seed"; mkdir -p "$SEED/bin"
@@ -112,24 +118,30 @@ PART_BLOCKS=$(( PART_BYTES / 4096 ))
 # metadata_csum / 64bit / dir_index. Same list its own smokes use.
 EXT2_FEATURES="${EXT2_SMOKE_FEATURES:-^resize_inode,^dir_index,^metadata_csum,^64bit,^uninit_bg}"
 
-dd if=/dev/zero of="$IMG" bs=1M count=128 status=none
-parted -s "$IMG" mklabel gpt \
+# Each image step is checked: one that failed used to go unnoticed until the
+# boot, where it surfaced as "never reached the agnsh prompt".
+img_step() { "$@" || { echo "  FAIL: image build step failed: $*"; exit 1; }; }
+img_step dd if=/dev/zero of="$IMG" bs=1M count=128 status=none
+img_step parted -s "$IMG" mklabel gpt \
     mkpart ESP fat32 1MiB 33MiB set 1 esp on \
     mkpart agnos-fs ext2 33MiB 100MiB
-sgdisk -t 2:8300 "$IMG" >/dev/null
-mformat -i "$IMG"@@1048576 -F
-mmd -i "$IMG"@@1048576 ::EFI ::EFI/BOOT ::boot
-mcopy -i "$IMG"@@1048576 "$GNOBOOT" ::EFI/BOOT/BOOTX64.EFI
-mcopy -i "$IMG"@@1048576 "$AGNOS_KERNEL" ::boot/agnos
-mkfs.ext2 -F -q -L AGNOS-YO -b 4096 -m 0 -O "$EXT2_FEATURES" \
+img_step sgdisk -t 2:8300 "$IMG" >/dev/null
+img_step mformat -i "$IMG"@@1048576 -F
+img_step mmd -i "$IMG"@@1048576 ::EFI ::EFI/BOOT ::boot
+img_step mcopy -i "$IMG"@@1048576 "$GNOBOOT" ::EFI/BOOT/BOOTX64.EFI
+img_step mcopy -i "$IMG"@@1048576 "$AGNOS_KERNEL" ::boot/agnos
+img_step mkfs.ext2 -F -q -L AGNOS-YO -b 4096 -m 0 -O "$EXT2_FEATURES" \
     -d "$SEED" -E offset=$PART_OFFSET "$IMG" $PART_BLOCKS
 
 cp "$OVMF_VARS_SRC" "$WORK/vars.fd"; chmod +w "$WORK/vars.fd"
 
 LOG="$WORK/serial.log"
-QMP="$WORK/qmp.sock"
+QLOG="$WORK/qemu.log"
+# The QMP socket goes in a short temporary directory: a Unix socket path is
+# limited to 108 bytes, and $WORK under a deep checkout can exceed it.
+QMP_DIR="$(mktemp -d /tmp/yo-qmp.XXXXXX)"
+QMP="$QMP_DIR/qmp.sock"
 : > "$LOG"
-rm -f "$QMP"
 
 KVM_ARGS="-cpu max"
 [ -r /dev/kvm ] && KVM_ARGS="-enable-kvm -cpu host"
@@ -150,7 +162,7 @@ qemu-system-x86_64 \
     -display none \
     -qmp "unix:$QMP,server,nowait" \
     -no-reboot \
-    >/dev/null 2>&1 &
+    >"$QLOG" 2>&1 &
 QPID=$!
 
 cleanup() {
@@ -164,6 +176,7 @@ cleanup() {
         kill -0 "$QPID" 2>/dev/null && kill -KILL "$QPID" 2>/dev/null || true
     fi
     wait "$QPID" 2>/dev/null || true
+    rm -rf "$QMP_DIR"
     sync
 }
 trap cleanup EXIT
@@ -191,7 +204,7 @@ wait_for() {
 # the guest is busy, so each key gets its own send-key round-trip plus a small
 # hold — a dropped character here would look like a yo failure.
 type_line() {
-    python3 - "$QMP" "$1" <<'PY'
+    python3 -I - "$QMP" "$1" <<'PY'
 import json, socket, sys, time
 
 sock_path, line = sys.argv[1], sys.argv[2]
@@ -260,6 +273,7 @@ if wait_for "$PROMPT" "$BOOT_TIMEOUT"; then
 else
     fail "never reached the agnsh prompt within ${BOOT_TIMEOUT}s"
     echo ""; echo "  --- serial tail ---"; logtext | tail -25 | sed 's/^/  /'
+    echo ""; echo "  --- qemu output ---"; tail -10 "$QLOG" | sed 's/^/  /'
     cleanup; trap - EXIT
     echo ""; echo "agnos-qemu-smoke: FAIL"; exit 1
 fi
@@ -296,6 +310,18 @@ else
     echo "  INFO: prompt did not return within 20s — output may be truncated"
 fi
 
+# A second command, for audit finding D: on AGNOS the request is copied into a
+# 2048-byte global, and `-s 3000` used to overrun it into the globals after it.
+# It must now refuse the send with EMSGSIZE and still print a summary.
+PROMPTS_BEFORE="$(prompt_count)"
+CMD2="yo -c 1 -n -s 3000 $TARGET"
+echo "  typing: $CMD2"
+if type_line "$CMD2"; then
+    wait_for_prompt_return "$PROMPTS_BEFORE" 30 || echo "  INFO: prompt did not return after the -s 3000 run"
+else
+    fail "QMP send-key failed (second command)"
+fi
+
 cleanup; trap - EXIT
 
 echo ""
@@ -322,6 +348,13 @@ if logtext | grep -qaE "PANIC|#PF|page fault|GPF|^fault:"; then
     logtext | grep -aE "PANIC|#PF|page fault|GPF|^fault:" | head -5 | sed 's/^/    /'
 else
     pass "no kernel fault"
+fi
+
+if logtext | grep -qa 'send failed: -90 EMSGSIZE'; then
+    pass "-s 3000 refused with EMSGSIZE — the 2048-byte request buffer holds (audit D)"
+else
+    fail "-s 3000 did not report EMSGSIZE (audit D)"
+    logtext | grep -a -A 3 -- "^yo $TARGET — 3000 bytes" | sed 's/^/    /'
 fi
 
 LOSS_LINE="$(logtext | grep -a '% loss' | head -1)"

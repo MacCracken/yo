@@ -1,9 +1,9 @@
 # icmp.cyr — RFC 792 ICMP Echo framing + RFC 1071 Internet checksum.
 #
-# Pure code. No syscalls. No kernel coupling. The kernel ICMP surface
-# (icmp_echo / net_send_raw + net_recv_raw, per roadmap 0.2.x) hands
-# us byte buffers; this module turns those buffers into echo requests
-# and back into parsed replies.
+# Pure code. No syscalls. No kernel coupling. The platform layer hands us
+# byte buffers (Linux: a ping or raw socket; AGNOS: the reply synthesised
+# around icmp_echo#55, ADR 0002); this module turns those buffers into echo
+# requests and back into parsed replies.
 #
 # Wire layout (RFC 792, big-endian):
 #   off 0:   type   (u8)   8 = ECHO_REQUEST, 0 = ECHO_REPLY
@@ -59,9 +59,13 @@ fn icmp_build_echo_request(buf, ident, seq, payload, payload_len): i64 {
 
 # Field accessors. Caller has already validated len >= ICMP_HEADER_LEN.
 fn icmp_type(buf):  i64 { return load8(buf); }
+# ICMP code byte (0 for echo).
 fn icmp_code(buf):  i64 { return load8(buf + 1); }
+# The stored RFC 1071 checksum, big-endian.
 fn icmp_cksum(buf): i64 { return (load8(buf + 2) << 8) | load8(buf + 3); }
+# Echo identifier, big-endian.
 fn icmp_ident(buf): i64 { return (load8(buf + 4) << 8) | load8(buf + 5); }
+# Echo sequence number, big-endian (16 bits on the wire).
 fn icmp_seq(buf):   i64 { return (load8(buf + 6) << 8) | load8(buf + 7); }
 
 # Returns 1 if the packet's stored checksum verifies, 0 otherwise.

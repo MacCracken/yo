@@ -27,6 +27,7 @@ var _AG_O_RDONLY      = 0;
 var _AG_ICMP_FD       = 900;       # sentinel fd for the (socketless) ICMP path
 
 var _ag_req[256];                  # stored ICMP request (module global = 2048 B)
+var _AG_REQ_CAP  = 2048;           # bytes in _ag_req: 256 slots × 8 (module-scope rule)
 var _ag_req_len  = 0;
 var _ag_req_addr = 0;
 var _ag_src_port = 0;              # bound UDP source port (single query at a time)
@@ -35,10 +36,32 @@ var _ag_last_echo_rc = 0;          # last sys_icmp_echo return, for --diag
 
 # --- ICMP (one-shot icmp_echo bridge) ---
 
-fn platform_icmp_open(): i64 { return _AG_ICMP_FD; }   # no real socket
+# No real socket: the sentinel stands in for one.
+fn platform_icmp_open(): i64 { return _AG_ICMP_FD; }
+
+# What to tell the user when no ICMP socket opened. On AGNOS that only happens
+# for IPv6 — the Linux hint about ping_group_range means nothing here.
+fn platform_icmp_open_hint(af): i64 {
+    var msg = "yo: no ICMP socket on this backend (agnos has no ICMPv6 syscall)\n";
+    if (af != 6) { msg = "yo: cannot reach the agnos ICMP syscall\n"; }
+    sys_write(2, msg, strlen(msg));
+    return 0;
+}
+
+# Forget the previous target's --diag facts (audit finding M).
+fn platform_diag_reset(): i64 {
+    _ag_last_echo_rc = 0;
+    return 0;
+}
 
 # Store the request; the actual send happens inside recv_ext's icmp_echo.
+# The request is copied into the 2048-byte _ag_req, so a longer one is refused
+# with -EMSGSIZE: it used to be copied whole, and `-s 2041` and up overwrote
+# _ag_req_len, then _ag_req_addr (the ping went to the payload's bytes), then
+# the DNS globals after them (audit finding D). The kernel's icmp_echo#55 sends
+# its own fixed payload anyway, so -s only shapes the synthesised reply here.
 fn platform_icmp_send_to(fd, packed_addr, pkt, pkt_len): i64 {
+    if ((pkt_len < 0) || (pkt_len > _AG_REQ_CAP)) { return 0 - 90; }
     _ag_req_addr = packed_addr;
     _ag_req_len  = pkt_len;
     var i = 0;
@@ -67,32 +90,63 @@ fn _ag_icmp_pong(buf, maxlen, ttl_out): i64 {
     return n;
 }
 
+# Plain recv: the echo bridge without a TTL out.
 fn platform_icmp_recv(fd, buf, maxlen): i64 { return _ag_icmp_pong(buf, maxlen, 0); }
+# Run icmp_echo#55 and hand back the synthesised reply; TTL out is a nominal 64.
 fn platform_icmp_recv_ext(fd, buf, maxlen, ttl_out): i64 { return _ag_icmp_pong(buf, maxlen, ttl_out); }
 
 # --- UDP (DNS resolution) ---
 
+var _ag_peer_ip   = 0;             # UDP peer recorded by platform_udp_send_to
+var _ag_peer_port = 0;             # 0 = nothing sent yet (accept any sender)
+
+# A 16-bit random value: the DNS query ID and the UDP source port. getrandom#45
+# failing used to leave the port to whatever was on the stack (audit finding R);
+# now it degrades to the clock, predictably but defined.
+fn platform_random_u16(): i64 {
+    var rb[8];
+    if (sys_getrandom(&rb, 2, 0) == 2) {
+        return ((load8(&rb) << 8) | load8(&rb + 1)) & 0xFFFF;
+    }
+    return (sys_uptime_ms() * 7919) & 0xFFFF;
+}
+
+# Bind a UDP listener on a random port in 49152..65535 (udp_bind#51).
 fn platform_udp_open(): i64 {
-    var rb[2];
-    sys_getrandom(&rb, 2, 0);
-    var port = 49152 + (((load8(&rb) << 8) | load8(&rb + 1)) & 0x3FFF);
+    var port = 49152 + (platform_random_u16() & 0x3FFF);
     var lid = sys_udp_bind(port);
     if (lid < 0) { return lid; }
     _ag_src_port = port;
+    _ag_peer_ip = 0;
+    _ag_peer_port = 0;
     return lid;
 }
 
+# Records the peer, so platform_udp_recv can drop datagrams from anyone else —
+# the AGNOS kernel delivers to a listener by destination port alone.
 fn platform_udp_send_to(fd, packed_addr, port, pkt, pkt_len): i64 {
-    var packed_ports = (_ag_src_port << 16) | (port & 0xFFFF);
+    _ag_peer_ip = packed_addr;
+    _ag_peer_port = port & 0xFFFF;
+    var packed_ports = (_ag_src_port << 16) | _ag_peer_port;
     return sys_udp_send(packed_addr, packed_ports, pkt, pkt_len);
 }
 
+# Poll the non-blocking udp_recv#53 against the timeout. A datagram whose source
+# (the kernel's 16-byte `from` record) is not the recorded peer is dropped and
+# the wait continues (audit finding K; the layout is platform_peer_match's).
+# Polls at least once. Returns bytes, a kernel error, or -11 (-EAGAIN) on expiry.
 fn platform_udp_recv(fd, buf, maxlen): i64 {
     var deadline = sys_uptime_ms() + _ag_timeout_ms;
-    while (sys_uptime_ms() < deadline) {
-        var n = sys_udp_recv(fd, buf, maxlen, 0);
-        if (n > 0) { return n; }
+    var from[16];
+    while (1) {
+        store64(&from, 0);
+        store64(&from + 8, 0);
+        var n = sys_udp_recv(fd, buf, maxlen, &from);
         if (n < 0) { return n; }
+        if (n > 0) {
+            if (platform_peer_match(&from, _ag_peer_ip, _ag_peer_port) == 1) { return n; }
+        }
+        if (sys_uptime_ms() >= deadline) { return 0 - 11; }
         sys_sleep_ms(5);
     }
     return 0 - 11;
@@ -100,16 +154,19 @@ fn platform_udp_recv(fd, buf, maxlen): i64 {
 
 # --- common ---
 
+# Release a UDP listener; the ICMP sentinel has nothing to close.
 fn platform_close(fd): i64 {
     if (fd >= _AG_ICMP_FD) { return 0; }       # ICMP sentinel — nothing to close
     return sys_udp_unbind(fd);                 # else a UDP listener
 }
 
+# Record the timeout the UDP poll loop uses (it cannot reach icmp_echo#55).
 fn platform_set_recv_timeout_ms(fd, timeout_ms): i64 {
     _ag_timeout_ms = timeout_ms;
     return 0;
 }
 
+# Read up to maxlen bytes of a file (sys_open / sys_read / sys_close).
 fn platform_read_file(path, buf, maxlen): i64 {
     var nl = 0;
     while (load8(path + nl) != 0) { nl = nl + 1; }
@@ -134,8 +191,10 @@ fn platform_read_file(path, buf, maxlen): i64 {
 # different things on two kernels does not belong in a source file.
 fn platform_dns_server(): i64 { return sys_net_dns_server(); }
 
+# Monotonic time, us — uptime_ms#40 × 1000, so 1 ms resolution.
 fn platform_now_us(): i64 { return sys_uptime_ms() * 1000; }
 
+# Sleep for ms milliseconds (sleep_ms#41).
 fn platform_sleep_ms(ms): i64 {
     if (ms <= 0) { return 0; }
     return sys_sleep_ms(ms);
@@ -145,7 +204,9 @@ fn platform_sleep_ms(ms): i64 {
 
 # No IPv6 ICMP syscall on AGNOS — report unavailable so yo skips the v6 path.
 fn platform_icmp6_open(): i64 { return 0 - 1; }
+# No ICMPv6 on agnos: always -1.
 fn platform_icmp6_send_to(fd, addr16, scope_id, pkt, pkt_len): i64 { return 0 - 1; }
+# No ICMPv6 on agnos: always -1.
 fn platform_icmp6_recv_ext(fd, buf, maxlen, hop_out): i64 { return 0 - 1; }
 
 # No interface-index / netlink concept exposed to ring 3 — 0 = unscoped/default.
@@ -154,12 +215,26 @@ fn platform_icmp6_recv_ext(fd, buf, maxlen, hop_out): i64 { return 0 - 1; }
 # filter out.
 fn platform_icmp_raw_mode(): i64 { return 0; }
 
+# No interface indexes in ring 3: always 0 (unscoped).
 fn platform_resolve_ifindex(name): i64 { return 0; }
 
-# No ring-3 signal/interrupt infra yet — install reports unavailable, check never
-# fires (continuous-ping Ctrl-C interruption is a host nicety, not load-bearing).
+# Ctrl-C is not wired on AGNOS yet (the kernel has sigprocmask#17 / signalfd#18;
+# roadmap). Install reports unavailable and the check never fires.
 fn platform_install_interrupt_watch(): i64 { return 0 - 1; }
+# Nothing to undo: no watch is installed on agnos.
+fn platform_remove_interrupt_watch(sigfd): i64 { return 0; }
+# Never interrupted on agnos (no ring-3 signal wiring yet).
 fn platform_check_interrupted(fd): i64 { return 0; }
+
+# There is nothing to wait on: icmp_echo#55 blocks inside recv_ext, so the
+# "socket" is always ready to be read. Never reports an interrupt.
+fn platform_wait_readable(fd, sigfd, timeout_ms): i64 { return 1; }
+
+# A plain sleep: no signal to wake it. Never reports an interrupt.
+fn platform_sleep_interruptible(sigfd, ms): i64 {
+    platform_sleep_ms(ms);
+    return 0;
+}
 
 # --- first-fail diagnostics (--diag) ----------------------------------
 #
@@ -175,18 +250,17 @@ fn platform_check_interrupted(fd): i64 { return 0; }
 # That single line separates "yo is broken" from "the box has no network",
 # which is the first fork in every AGNOS net debug.
 #
-# NOTE: roadmap.md § 0.7.x asked for kernel ICMP send/recv COUNTERS here.
-# Those do not exist: the agnos kernel keeps no ICMP tx/rx counters and
-# exposes none to ring 3 (net_config has exactly four fields, 0..3, and
-# returns -1 for anything else). Adding them is an agnos-side change, so
-# this dumps the configuration state that IS reachable plus the raw
-# icmp_echo return, and the counters stay a kernel ask.
+# NOTE: kernel ICMP counters now exist — agnos 1.56.48 added icmp_tx / icmp_rx /
+# icmp_replies_sent / icmp_timeouts as net_config#61 fields 4..7, and the
+# vendored stdlib wraps them (sys_net_icmp_*). This dump does not show them
+# yet; that is roadmap work together with icmp_echo_ex#100 for -W.
 fn platform_diag_dump(target, af): i64 {
     output_diag_open(target, af);
     output_diag_kv("backend         ", "agnos (sovereign syscalls)");
 
     if (af == 6) {
-        output_diag_kv("note            ", "no ICMPv6 syscall on agnos — the v6 path is unavailable, not merely silent");
+        output_diag_kv("note            ",
+            "no ICMPv6 syscall on agnos — the v6 path is unavailable, not merely silent");
     }
 
     output_diag_kv_ipv4("net ip          ", sys_net_ip());
