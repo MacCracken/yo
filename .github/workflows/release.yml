@@ -42,7 +42,9 @@ jobs:
 
       - name: Build
         run: |
-          cyrius deps
+          # --locked: fail if the tags no longer resolve to the committed
+          # cyrius.lock (see ci.yml's "Resolve dependencies" step).
+          cyrius deps --locked
           mkdir -p build
           cyrius build src/main.cyr build/${{ github.event.repository.name }}
 

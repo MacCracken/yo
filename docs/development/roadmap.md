@@ -356,6 +356,24 @@ Deliberate exclusions — keeps future contributors from adding to v1.0 by accid
 
 ## Recorded by cyrius 6.7.6 (2026-10-08) — for the next cyrius pin move
 
+✅ **Done at yo 0.7.0 (cyrius 6.7.9, 2026-11-08).** Checked against the tool, item by item:
+
+- [x] A default resolve in this checkout builds taar's tag and prints
+      `hint: 1 dep has a local checkout not in use (taar); CYRIUS_LOCAL=1 builds it`.
+- [x] `CYRIUS_LOCAL=1` builds `../taar` (at the time, `d203629`, two commits past 0.6.0) from
+      `build/local-deps/lib/`. Before and after hashes show `lib/` and `cyrius.lock` were not written.
+- [x] Commit pins: the lock already carried one from yo 0.6.2's CI-faithful resolve. It was regenerated at
+      0.7.0 so it holds only taar 0.6.0's `2c02641`.
+- [x] `cyrius deps --locked`: yo's CI had no lock guard or `sed` step to replace; it ran plain `cyrius deps`.
+      Tested at 6.7.9 on a lock with one hash zeroed: plain `deps` fails (rc 1) on a stdlib leaf that disagrees
+      with the pin, but rewrites a wrong `lib/taar.cyr` hash and exits 0. `--locked` fails on both and writes
+      nothing. `ci.yml` and `release.yml` now resolve with `--locked`. It does not flag a leftover old-tag commit
+      row, so regenerate the lock at a tag bump.
+- [x] The `cyrius.cyml` comment is rewritten: `git`+`tag` is what every default resolve builds, and `path` is
+      local mode only.
+
+The original note follows.
+
 ⛔ Needs cyrius >= 6.7.6 — nothing to do until cyrius 6.7.6 is tagged; then at your pin bump:
 
 - **Git first: a `path` beside `git` / `tag` becomes a dev override** (here: `taar`).

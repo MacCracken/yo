@@ -4,6 +4,53 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-08
+
+### Changed
+
+- **Toolchain `6.6.20` → `6.7.9`, the 6.7 language minor.** No source change. The 11
+  stdlib modules yo declares have the same 254 symbols at both tags in
+  `docs/api-surface.snapshot`. `src/` and `tests/` were checked against the 6.7.x
+  migration notes for changes that compile but compute differently, and none apply:
+  - no lone `!` (before 6.7.3 the lexer dropped it, so `!x` meant `x`);
+  - no unary `-` or `~` on a constant followed by an operator and a literal (6.7.9
+    re-binds those). The one enum, `CliResult`, is never negated;
+  - no identifier the 6.7.x releases reserved (`trait`, `const`, `true`, `false`, `do`,
+    `dyn`);
+  - no `bool`, `f32`, typed pointer, slice, generic or `impl`.
+
+  The changes that became compile errors (an unmatched `}`, a `for` step on an
+  undeclared name, forward-call arity) do not fire. The 6.7.9 run passes build, the AGNOS
+  build, tests (386 assertions), bench and fuzz. Output and exit codes match the 0.6.2
+  build in 15 cases, including `-v`, `--diag`, `-s 1000` and two targets in one run. RTT
+  values were masked out. The `CYRIUS_DCE=1` build matches too. Sizes moved by bytes:
+  187,632 B default (+8), 197,976 B AGNOS (+16), 77,040 B under DCE (+8). `lib/` is
+  re-vendored: the same 29 files, each byte-identical to the 6.7.9 bundled stdlib.
+- **taar `0.5.2` → `0.6.0`**, taar's cyrius 6.7.9 release. Its bundle differs from 0.5.2
+  only in the version line.
+- **`path = "../taar"` no longer overrides the tag.** From cyrius 6.7.6 a `path` beside
+  `git` + `tag` is read only in local mode. A default `cyrius deps`, `build` or `test` in
+  this checkout now builds taar 0.6.0, checks its commit pin, and prints
+  `hint: 1 dep has a local checkout not in use (taar)`. The 0.6.2 warning about
+  committing a lock produced beside `../taar` therefore no longer applies.
+  `CYRIUS_LOCAL=1` builds `../taar` instead (today taar 0.6.2, two commits past 0.6.0)
+  from `build/local-deps/lib/`, and leaves `lib/` and `cyrius.lock` untouched. The
+  `cyrius.cyml` comment that called `path` the local-dev resolution path is rewritten.
+- **`cyrius.lock` is regenerated for the new pin**, as the 6.7.x migration guide asks. A
+  resolve over the old lock kept the taar 0.5.2 commit row beside the new 0.6.0 one. The
+  regenerated lock holds only `2c02641`, taar 0.6.0, which matches the published tag.
+  `cyrius deps --locked` passes against it in a CI-faithful copy and in this checkout.
+- **CI and release resolve with `cyrius deps --locked`.** Plain `cyrius deps` failed on a
+  stdlib hash that disagreed with the pin, but it rewrote a wrong `lib/taar.cyr` hash and
+  exited 0, so a stale committed lock went through. `ci.yml`'s "Resolve dependencies"
+  step and `release.yml`'s Build step now use `--locked`. On a fresh checkout it checks
+  the resolve against `cyrius.lock` alone, writes nothing, and the build steps then
+  vendor `lib/` from the same tags. Both workflows' `run:` blocks were run from the YAML
+  on a fresh staged checkout and pass, leaving the lock unchanged. With a zeroed taar
+  hash, a zeroed stdlib hash or a zeroed commit pin, the resolve step fails and names the
+  difference. ⚠ A leftover commit row for an old tag is not flagged, because cyrius keeps
+  those rows on purpose. Regenerate the lock at a tag bump to drop them.
+
 ## [0.6.2] - 2026-11-08
 
 ### Changed

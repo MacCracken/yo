@@ -36,7 +36,12 @@ jobs:
           echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
 
       - name: Resolve dependencies
-        run: cyrius deps
+        # --locked (cyrius >= 6.7.6) resolves the tags, writes nothing, and fails
+        # naming each difference from the committed cyrius.lock. Plain `cyrius deps`
+        # fails on a stdlib hash that disagrees with the pin, but silently re-locks
+        # a wrong lib/taar.cyr hash and exits 0 (tested at 6.7.9). The build steps
+        # below then vendor lib/ from the same tags.
+        run: cyrius deps --locked
 
       - name: Build
         run: |
