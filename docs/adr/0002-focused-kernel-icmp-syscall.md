@@ -88,7 +88,7 @@ This is not a bug — the kernel did the matching, which is precisely the deal t
 
 **Enforcing `-W` host-side — call #55 and abandon it after `timeout_ms`.** Rejected: it cannot be built. #55 blocks in the kernel, and there is no ring-3 way to interrupt it — AGNOS has no ring-3 signal infrastructure, which is why `platform_install_interrupt_watch` returns `-1` and `platform_check_interrupted` never fires (`platform_agnos.cyr:162`). A host-side timeout would need a timer and a cancellation path that do not exist. Parameterising the kernel's bound is the only real version of this.
 
-## Update — 2026-11-08, yo 0.8.x
+## Update — 2026-11-08, yo 0.8.0
 
 The kernel took the move § Neutral named as preferred, with one change of form,
 and yo has adopted it. This decision stands; three of its consequences moved.

@@ -1,6 +1,6 @@
 # yo — Roadmap
 
-> **Status**: Active | **Last updated**: 2026-11-08 (unreleased 0.8.x: the AGNOS `-W`, counter and SIGINT items)
+> **Status**: Active | **Last updated**: 2026-11-08 (0.8.0: the AGNOS `-W`, counter and SIGINT items)
 >
 > The plan from here to v1.0, then the trigger-gated backlog after it. Shipped work
 > is not listed: its record is [`CHANGELOG.md`](../../CHANGELOG.md), and the audit
@@ -28,7 +28,7 @@ surface is frozen (0.10.x).
 
 ## 0.8.x — backend parity
 
-The AGNOS `-W`, ICMP-counter and SIGINT items shipped (CHANGELOG `[Unreleased]`).
+The AGNOS `-W`, ICMP-counter and SIGINT items shipped in 0.8.0 (CHANGELOG `[0.8.0]`).
 What they could not reach is a kernel property, recorded in `state.md` § Kernel
 coupling. agnos raises no signal from the console, so Ctrl-C at the keyboard
 reaches no program, and an ordinary signal cannot end a reply wait.

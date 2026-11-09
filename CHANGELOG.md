@@ -4,6 +4,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-08
+
 The three AGNOS items of roadmap 0.8.x. Each uses kernel surface agnos 1.56.48
 added and the vendored stdlib already wraps; `src/` reaches it only through the
 `sys_*` wrappers, never by number. The Linux backend is unchanged apart from

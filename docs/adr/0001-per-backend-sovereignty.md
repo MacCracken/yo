@@ -236,7 +236,7 @@ is not possible here. A binary emitted for the agnos target cannot issue Linux s
 and the reverse holds too. The `#ifdef` is not a preference over runtime dispatch; runtime
 dispatch was never on the table.
 
-## Update — 2026-11-08, yo 0.8.x
+## Update — 2026-11-08, yo 0.8.0
 
 Two of the gaps § Consequences lists closed through kernel surface agnos 1.56.48
 added, without a POSIX call on the AGNOS path:

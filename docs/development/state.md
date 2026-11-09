@@ -2,7 +2,7 @@
 
 > **⚠ NOT A LOG.** Live state with pointers — current truth only. Per-release history → [`../../CHANGELOG.md`](../../CHANGELOG.md). Milestone path → [`roadmap.md`](roadmap.md). Audits → [`../audit/`](../audit/).
 >
-> **Last refresh**: 2026-11-08 (unreleased, on 0.7.2: the AGNOS 0.8.x items — `-W` through `icmp_echo_ex`#100, ICMP counters in `--diag`, SIGINT). The position, verification and kernel-coupling sections were re-checked against the code and the agnos source for that work; the rest of the snapshot at 0.7.2, and the dependency and family facts at 0.7.1, the same day.
+> **Last refresh**: 2026-11-08 (0.8.0: the AGNOS items — `-W` through `icmp_echo_ex`#100, ICMP counters in `--diag`, SIGINT). The position, verification and kernel-coupling sections were re-checked against the code and the agnos source at this release; the speed row at 0.7.2, and the dependency and family facts at 0.7.1, the same day.
 
 ---
 
@@ -10,11 +10,11 @@
 
 | Field | Value |
 |---|---|
-| Current version | **0.7.2** |
+| Current version | **0.8.0** |
 | Cyrius pin | 6.7.18 · taar dep 0.6.2 |
-| Status | **Both shipping backends work and are validated, and the tree is audited.** Linux is at POSIX-ping output parity for v4 + v6. AGNOS reaches ICMP through the sovereign kernel surface, is iron-validated, and passes its QEMU smoke; since the unreleased 0.8.x work it honours `-W`, prints the kernel ICMP counters in `--diag`, and stops on SIGINT. The 0.7.2 P(-1) fixed 25 findings ([report](../audit/2026-11-08-audit.md)). Windows / Apple are v1 backlog. |
+| Status | **Both shipping backends work and are validated, and the tree is audited.** Linux is at POSIX-ping output parity for v4 + v6. AGNOS reaches ICMP through the sovereign kernel surface, is iron-validated, and passes its QEMU smoke; since 0.8.0 it honours `-W`, prints the kernel ICMP counters in `--diag`, and stops on SIGINT. The 0.7.2 P(-1) fixed 25 findings ([report](../audit/2026-11-08-audit.md)). Windows / Apple are v1 backlog. |
 | Backends | Linux (**working**) · AGNOS (**working, validated**) · Windows / Apple (post-1.0) |
-| Tests | **505** assertions in `tests/yo.tcyr`; **49** host guards mutation-checked (37 at 0.7.2, 12 for the 0.8.x AGNOS helpers; removing any one turns a suite red), and the AGNOS-only guards the host cannot reach mutation-checked through the QEMU smoke (§ Verification). `tests/yo.fcyr`: 20,000 deterministic fuzz rounds, 22 invariants, run plain and under `--poison`. `tests/integration/run.sh`: **28** end-to-end checks in a network namespace (0.7.1 fails 18). `tests/yo.bcyr`: 8 rows. Bare `cyrius test` also runs the `src/test.cyr` stub, so it reports 2 units. Exit codes are clamped to 1 (since 0.5.9). |
+| Tests | **505** assertions in `tests/yo.tcyr`; **49** host guards mutation-checked (37 at 0.7.2, 12 for the 0.8.0 AGNOS helpers; removing any one turns a suite red), and the AGNOS-only guards the host cannot reach mutation-checked through the QEMU smoke (§ Verification). `tests/yo.fcyr`: 20,000 deterministic fuzz rounds, 22 invariants, run plain and under `--poison`. `tests/integration/run.sh`: **28** end-to-end checks in a network namespace (0.7.1 fails 18). `tests/yo.bcyr`: 8 rows. Bare `cyrius test` also runs the `src/test.cyr` stub, so it reports 2 units. Exit codes are clamped to 1 (since 0.5.9). |
 | Cleanliness | `cyrius audit` fully clean — fmt, lint, docs (every public fn documented) — and gated in CI. |
 | Build size | **205,104 B** default (513 unreachable fns, 116,684 B). **86,320 B** with `CYRIUS_DCE=1`. AGNOS 215,968 B, or 88,992 B under DCE. (0.7.2: 200,936 / 86,248; AGNOS 215,144 / 84,072.) iputils `ping` is 155,160 B, so the DCE build is smaller and the default build is not; the 1.0 size criterion turns on which one releases ship (roadmap 0.10.x). |
 | Speed | 0.6.0, best of 3 × 100 `-c 1 -n 127.0.0.1`: **yo 381 µs** vs iputils 458 µs. 0.7.2 under a bash loop on this host: 448–449 µs against 444–445 µs for 0.7.1. Bench medians: `icmp_checksum` 64 B 96 ns, `icmp_build_echo_request` 206 ns, `ipv4_parse` 54 ns, `ipv6_parse` 309 ns, `output_ipv4_to_buf` 85 ns, `probe_reply_is_ours` raw+cksum 116 ns, PTR parse + hostname check 183 ns, question echo 107 ns. |
@@ -23,11 +23,12 @@
 
 ## Current position
 
-**0.7.2 closed the first P(-1) audit.** 25 findings, all fixed; the decisions and
+**0.8.0 brought the AGNOS arm onto the kernel surface it was missing** (`-W`, the ICMP
+counters, SIGINT). **0.7.2 closed the first P(-1) audit.** 25 findings, all fixed; the decisions and
 feature work it surfaced are on the roadmap. What remains before 1.0 is three bands
 ([`roadmap.md`](roadmap.md)):
 
-- **0.8.x — backend parity.** The three AGNOS items are done, unreleased on 0.7.2:
+- **0.8.x — backend parity.** The three AGNOS items shipped in 0.8.0:
   `-W` through `sys_icmp_echo_ex`, ICMP counters through `sys_net_icmp_*`, and
   SIGINT through `sys_sigprocmask` / `sys_signalfd`. What they cannot do is the
   kernel's (§ Kernel coupling): agnos raises no signal from the console, and a
@@ -52,7 +53,7 @@ feature work it surfaced are on the roadmap. What remains before 1.0 is three ba
 | The SOCK_RAW fallback (v4 + v6), Ctrl-C, multi-target stop, RSS over a long run, the seq wrap, DNS end to end (PTR injection, a forged reply, fail-closed resolv.conf, CRLF) | `tests/integration/run.sh`: 28 checks in an `unshare` network + mount namespace with a fake DNS server | **in CI** under `sudo unshare` since 0.7.2 — that branch had not yet run on GitHub at release |
 | AGNOS backend **compiles** | `cyrius build --agnos` | **in CI** |
 | AGNOS backend **runs** | `scripts/agnos-qemu-smoke.sh`: boots agnos, types probes over QMP `send-key`, asserts on serial. 2026-11-08, on a kernel built from the agnos working tree (VERSION 1.57.18, with uncommitted changes): 2/2 replies from the SLIRP gateway; `-s 3000` refused with EMSGSIZE; `-W 500` × 2 lost probes in **1077 ms**, timed in the guest; `--diag` showing `icmp tx: 2 this run` with rx unmoved and the "requests left this host" verdict; a SIGINT in a 2 s interval ending yo in **45 ms** with its summary; a SIGINT during the last reply wait stopping the run before the second target (the wait ran to -W, 1297 ms after the signal); no kernel fault. The SIGINTs come from `tests/agnos/yosmoke.cyr`, yo's parent in the guest. **AGNOS-side mutations, through the smoke:** #55 only (6085 ms), no post-loop check (second target started), totals for deltas, one shared bound (2084 ms), an unsliced sleep (824 ms), no watch (55 s, 30 sent): 6 of 6 killed. ⚠ the `ttl=64` it prints is a literal from `_ag_icmp_pong`, not a measurement | manual — needs the agnos / gnoboot / agnoshi checkouts, QEMU and OVMF |
-| AGNOS on real hardware | agnos **1.51.7** burn, 2026-07-02: `yo google.com` **4/4 at 0% loss**, real DHCP lease. A gateway-literal run is not separately recorded, and the 0.8.x paths (#100, the counters, SIGINT) have not run on iron; 1.51.7 predates #100, so a new yo there takes the #55 fallback (roadmap 0.8.x) | manual burn |
+| AGNOS on real hardware | agnos **1.51.7** burn, 2026-07-02: `yo google.com` **4/4 at 0% loss**, real DHCP lease. A gateway-literal run is not separately recorded, and the 0.8.0 paths (#100, the counters, SIGINT) have not run on iron; 1.51.7 predates #100, so a new yo there takes the #55 fallback (roadmap 0.8.x) | manual burn |
 | aarch64 | ⚠ **builds clean and would be wrong.** `src/platform_linux.cyr`'s original paths use x86_64 syscall numbers (`_LX_SYS_*`); on aarch64, 44 is `fstatfs(2)`, not `sendto`. Code added at 0.7.2 uses the stdlib wrappers. yo ships x86_64 only, so this is latent | none (roadmap 0.8.x) |
 
 ## Dependencies (current)

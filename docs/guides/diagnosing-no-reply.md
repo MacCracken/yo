@@ -259,7 +259,7 @@ returns nothing on iron you have the serial console and whatever the tool prints
 
 ### Worked example — a real capture
 
-From the QEMU smoke (0.8.x), `yo -c 2 -W 500 -i 0 -n --diag 192.0.2.1`. That is
+From the QEMU smoke (0.8.0), `yo -c 2 -W 500 -i 0 -n --diag 192.0.2.1`. That is
 TEST-NET-1, which nothing answers:
 
 ```
@@ -343,7 +343,7 @@ On a kernel older than 1.56.48 the counters do not exist; the dump says
 
 ### `-W` on the AGNOS backend
 
-Since 0.8.x, `-W` is the reply bound on AGNOS too. `icmp_echo_ex`#100 is still
+Since 0.8.0, `-W` is the reply bound on AGNOS too. `icmp_echo_ex`#100 is still
 **one-shot**: it sends one echo, blocks for the reply, and returns the RTT in
 milliseconds (`>= 0`) or `-1`. Its timeout is a parameter, and yo passes `-W`.
 The `echo timeout ms` line shows the bound the kernel was given. Two limits
