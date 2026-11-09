@@ -2,7 +2,7 @@
 
 > **⚠ NOT A LOG.** Live state with pointers — current truth only. Per-release history → [`../../CHANGELOG.md`](../../CHANGELOG.md). Milestone path → [`roadmap.md`](roadmap.md).
 >
-> **Last refresh**: 2026-11-08 (0.7.0: toolchain 6.7.9, taar 0.6.0). The snapshot, pin, dependency, family and size facts below were re-measured at this release. The rest of the file is as of 0.6.0 (2026-08-26) unless a line says otherwise.
+> **Last refresh**: 2026-11-08 (0.7.1: toolchain 6.7.18, taar 0.6.2). The snapshot, pin, dependency, family and size facts below were re-measured at this release. The rest of the file is as of 0.6.0 (2026-08-26) unless a line says otherwise.
 
 ---
 
@@ -10,13 +10,13 @@
 
 | Field | Value |
 |---|---|
-| Current version | **0.7.0** |
-| Cyrius pin | 6.7.9 · taar dep 0.6.0 |
+| Current version | **0.7.1** |
+| Cyrius pin | 6.7.18 · taar dep 0.6.2 |
 | Status | **Both shipping backends work and are validated.** Linux is at full POSIX-ping output parity for v4 + v6. AGNOS reaches ICMP through the sovereign kernel surface, is iron-validated, and has an automated QEMU gate. Windows / Apple remain post-1.0. |
 | Backends | Linux (**working**) · AGNOS (**working, validated**) · Windows / Apple (post-1.0) |
 | Tests | **386** assertions in `tests/yo.tcyr`. Bare `cyrius test` also runs the `[build].test` stub `src/test.cyr` (cyrius ≥ 6.6.17), so it reports 2 units. `tests/yo.bcyr` (5 real benchmark rows) and `tests/yo.fcyr` both green. Gate is sound since 0.5.9 — all three entry points clamp a non-zero return to 1, closing the 256/512/768-failure wait-status truncation. |
-| Build size | **187,632 B** default build (`.text` 180,644), of which 495 unreachable fns are 110,213 B. **77,040 B** with `CYRIUS_DCE=1`, which removes them. AGNOS build 197,976 B. Within 16 B of the 6.6.20 build. At 6.6.2 the same tree was 152,712 B default and 70,792 B under DCE. For comparison, iputils `ping` is 155,160 B. |
-| Speed | `-c 1 -n 127.0.0.1`, best of 3 × 100 runs: **yo 381 µs** vs iputils `ping` 458 µs — ~17% faster per invocation (0.6.0). At 0.6.2 and again at 0.7.0, each new build measured within 2% of the one before on one host: 574–604 µs under a bash loop across 6.6.2, 6.6.20 and 6.7.9, against 1,028 µs for iputils there. Pure-path rows (`cyrius bench`): `icmp_checksum` 64 B **95 ns**, `icmp_build_echo_request` **197 ns**, `ipv4_parse` **52 ns**, `ipv6_parse` **291 ns**, `output_ipv4_to_buf` **86 ns**. |
+| Build size | **191,784 B** default build (`.text` 186,233), of which 514 unreachable fns are 115,752 B. **77,096 B** with `CYRIUS_DCE=1`, which removes them. AGNOS build 206,368 B, or 79,392 B under DCE; the AGNOS live-code growth since 6.7.9 is `sys_write`'s socket send-deadline branch (6.7.11 LIB-6), which yo never takes. At 6.6.2 the same tree was 152,712 B default and 70,792 B under DCE. For comparison, iputils `ping` is 155,160 B. |
+| Speed | `-c 1 -n 127.0.0.1`, best of 3 × 100 runs: **yo 381 µs** vs iputils `ping` 458 µs — ~17% faster per invocation (0.6.0). At 0.6.2, 0.7.0 and 0.7.1, each new build measured within 2% of the one before on one host: 556–604 µs under a bash loop across 6.6.2 → 6.7.18, against 1,028 µs for iputils there. At 0.7.1 `icmp_checksum` benched 101–115 ns against 95–96 ns for 0.7.0; the other rows did not move. Pure-path rows (`cyrius bench`): `icmp_checksum` 64 B **95 ns**, `icmp_build_echo_request` **197 ns**, `ipv4_parse` **52 ns**, `ipv6_parse` **291 ns**, `output_ipv4_to_buf` **86 ns**. |
 | Iron-validation host | archaemenid (Beelink SER, AMD) |
 | Family position | First entry in the network-tools family; sibling to `dig` and `whirl`, all three on the `taar` substrate |
 
@@ -43,9 +43,9 @@ IPv6-nameserver limitation — and it now names the roadmap item that tracks it.
 landed `#100 icmp_echo_ex(dst_ip, timeout_ms)`, ICMP counters on `net_config`#61 fields
 4..7, and id+seq reply matching, closing four of the six kernel asks yo had filed. The
 cyrius peers were not in a release when 0.6.0 shipped. They are in the stdlib yo vendors
-now: `SYS_ICMP_ECHO_EX` (`lib/syscalls_x86_64_agnos.cyr:532`), `sys_icmp_echo_ex` (`:2294`)
-and `sys_net_icmp_tx` / `_rx` / `_replies_sent` / `_timeouts` (`:2337-2343`), checked at
-the 6.7.9 pin and present since 6.6.2. Nothing in `src/` calls them yet. Use the
+now: `SYS_ICMP_ECHO_EX` (`lib/syscalls_x86_64_agnos.cyr:562`), `sys_icmp_echo_ex` (`:2375`)
+and `sys_net_icmp_tx` / `_rx` / `_replies_sent` / `_timeouts` (`:2437-2443`), checked at
+the 6.7.18 pin and present since 6.6.2. Nothing in `src/` calls them yet. Use the
 wrappers, never the raw numbers: agnos's number space overlaps Linux's on purpose, so a
 raw literal dispatches a different arm on the other backend. [`roadmap.md`](roadmap.md)
 § 0.6.x lists what adopting them does; its "gated on a cyrius release" block predates
@@ -60,8 +60,8 @@ Beyond that band, two things are genuinely open:
    AGNOS backend still *runs*; only that it still builds.
 2. **The "≤ 30 KB after DCE" size criterion is measurable again, and not met.** At 0.6.0
    cyrius's DCE NOP-filled rather than stripped. From the 6.6.2 pin on
-   `CYRIUS_DCE=1` removes unreachable fns: 77,040 B against the 187,632 B default build
-   (6.7.9).
+   `CYRIUS_DCE=1` removes unreachable fns: 77,096 B against the 191,784 B default build
+   (6.7.18).
    That is still about 2.5× the criterion. Either restate it or find the remaining bytes.
    Do not silently drop it.
 
@@ -86,16 +86,16 @@ string fmt alloc io vec str syscalls assert bench args flags
 `args` + `flags` arrived with the CLI. DNS (0.4.0) and IPv6 (0.5.x) added none — the
 resolver and the v6 framing are built directly on `platform_*` and stay in-tree.
 `cyrius deps` vendors these into the gitignored `lib/`, hash-locked in `cyrius.lock`
-(29 files at the 6.7.9 pin, each byte-identical to the bundled stdlib; `poison` and
+(29 files at the 6.7.18 pin, each byte-identical to the bundled stdlib; `poison` and
 `alloc_cx` arrive transitively).
 
-**Pin status**: `cyrius = "6.7.9"`. The 11 declared modules lost no symbol and changed no
-arity from 6.6.2 to 6.6.20 (233 → 254 symbols in `docs/api-surface.snapshot`), and are
-identical from 6.6.20 to 6.7.9 (254 both). Newer 6.7.x releases exist. Read cyrius's
+**Pin status**: `cyrius = "6.7.18"`, the newest cyrius release as of 2026-11-08. The 11
+declared modules have lost no symbol and changed no arity since 6.6.2 (`docs/api-surface.snapshot`:
+233 at 6.6.2, 254 at 6.6.20 and 6.7.9, 258 at 6.7.18). Read cyrius's
 `docs/development/ecosystem-migration.md` at the target tag before the next move.
 
-**taar** (`cyrius.cyml [deps.taar]`) — **0.6.0**, `modules = ["dist/taar.cyr"]`, commit
-pin `2c02641` in `cyrius.lock`. yo consumes **one symbol**, `ipv4_parse`; the bundle's
+**taar** (`cyrius.cyml [deps.taar]`) — **0.6.2**, `modules = ["dist/taar.cyr"]`, commit
+pin `d203629` in `cyrius.lock`. yo consumes **one symbol**, `ipv4_parse`; the bundle's
 `socket`/`dns` modules ride along and DCE out. The extraction plan is **done**; it
 landed at 0.5.5.
 
@@ -117,15 +117,15 @@ The substrate and both siblings exist; none of this is "planned" any more.
 
 | Repo | Version | Cyrius pin | taar | Relationship |
 |---|---|---|---|---|
-| **taar** | 0.6.2 (0.6.0 is its 6.7.9 cut) | 6.7.18 | — | Substrate. yo folded `src/ipv4.cyr` onto it at 0.5.5. |
+| **taar** | 0.6.2 | 6.7.18 | — | Substrate. yo folded `src/ipv4.cyr` onto it at 0.5.5. |
 | **dig** | 0.4.1 | 6.6.2 | 0.5.0 | DNS resolver. Second `ipv4` consumer — it forced the extraction. |
 | **whirl** | 0.6.14 | 6.6.2 | 0.5.0 | curl/wget. Third consumer; uses taar's `socket` + `dns`, which yo does not. |
 
-**Family drift**: as of 2026-11-08 yo is the first consumer on 6.7.9 and taar 0.6.0.
-`dig` and `whirl` pin 6.6.2 and taar 0.5.0. The evidence gathered here applies to them
-when they follow: no stdlib removals or arity changes across 6.6.2 → 6.7.9 for these 11
-modules, taar's `ipv4_*` surface unchanged, and the 6.7.x silent-semantics checklist in
-yo's 0.7.0 CHANGELOG entry. Each still needs that checklist run against its own source.
+**Family drift**: as of 2026-11-08 yo is the first consumer on 6.7.18 and taar 0.6.2,
+matching taar's own pin. `dig` and `whirl` pin 6.6.2 and taar 0.5.0. The evidence
+gathered here applies to them when they follow: no stdlib removals or arity changes
+across 6.6.2 → 6.7.18 for these 11 modules, taar's `ipv4_*` surface unchanged, and the
+6.7.x checks in yo's 0.7.0 and 0.7.1 CHANGELOG entries. Each still needs that checklist run against its own source.
 `whirl` carries the larger risk, since it pulls the crypto/TLS leaves yo does not.
 
 ## Kernel coupling (AGNOS backend only)
@@ -169,10 +169,10 @@ TTL, `IPV6_CHECKSUM`/`IPV6_RECVHOPLIMIT` for v6, `SO_RCVTIMEO` for `-W`, and
 | Item | Blocked on | Owning repo |
 |---|---|---|
 | ~~Kernel ICMP tx/rx **counters**~~ | ✅ **agnos 1.56.48** — `net_config`#61 fields 4..7 (`icmp_tx`/`icmp_rx`/`icmp_replies_sent`/`icmp_timeouts`). yo consumes them once cyrius ships the wrappers. | done |
-| ~~Section GC / true dead-code **stripping**~~ | ✅ `CYRIUS_DCE=1` strips from the 6.6.2 pin on (77,040 B at 0.7.0). The ≤30 KB criterion is now a yo question; see § Current position. | done |
+| ~~Section GC / true dead-code **stripping**~~ | ✅ `CYRIUS_DCE=1` strips from the 6.6.2 pin on (77,096 B at 0.7.1). The ≤30 KB criterion is now a yo question; see § Current position. | done |
 | ~~A configurable timeout on `icmp_echo`#55~~ | ✅ **agnos 1.56.48** — minted as `#100 icmp_echo_ex(dst_ip, timeout_ms)` rather than widening `#55` (unused syscall arg registers carry stale data, so widening a live arm is not ABI-safe). `-W` becomes honourable on AGNOS once yo calls `sys_icmp_echo_ex`, which is vendored but not yet used. | done |
 | **IPv6 on agnos** — blocks `yo -6` there | agnos has **no IPv6 stack at all** (no `0x86DD` arm, no NDP, no ICMPv6). Now formally backlogged in agnos's `roadmap.md` § OPEN rather than merely absent. | agnos |
-| Family toolchain drift | `dig` and `whirl` (both 6.6.2 / taar 0.5.0) trail yo's 6.7.9 / taar 0.6.0 | dig + whirl |
+| Family toolchain drift | `dig` and `whirl` (both 6.6.2 / taar 0.5.0) trail yo's 6.7.18 / taar 0.6.2 | dig + whirl |
 
 *Both former AGNOS gates are closed* — `cyrius/lib/args.cyr:99` gained its agnos branch
 at cyrius 6.0.87/6.1.32, and `icmp_echo`#55 / UDP #51-54 / `net_config`#61 went ring-3

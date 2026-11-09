@@ -4,6 +4,45 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-11-08
+
+### Changed
+
+- **Toolchain `6.7.9` → `6.7.18`.** No source change. The 11 stdlib modules yo declares
+  gained four symbols and lost none (254 → 258): `io::env_block` and three `str` JSON
+  helpers. yo defines none of those names. The 6.7.10–6.7.18 migration notes were checked
+  against the 47 stdlib and taar functions yo calls, and against the language features it
+  uses. Three entries touch yo, and none changes what it does:
+  - `args_init()` now returns a negative errno on failure, not 0 (6.7.12, LIB-14). `main`
+    ignores the return value.
+  - On AGNOS, a negative fd no longer aliases socket slot 7 (6.7.11, LIB-3). yo's ICMP
+    sentinel fd never reaches `sys_close` (`src/platform_agnos.cyr:104`), and
+    `platform_read_file` checks the open before reading.
+  - `cyrius lint` gained overrun and write-length rules (6.7.11, TL-3). They report
+    nothing in `src/` or `tests/`. The eight long-line warnings are the same ones 6.7.9
+    gives.
+
+  The workflow's own steps, run from the YAML on a fresh checkout, pass: `--locked`,
+  build, the AGNOS build, tests (386 assertions), bench and fuzz. The same steps pass in
+  this checkout. Output and exit codes match 0.7.0 in the same 15 cases, with RTT values
+  masked out, and the `CYRIUS_DCE=1` build matches too. `lib/` is re-vendored: the same 29
+  files, each byte-identical to the 6.7.18 bundled stdlib. Per-call time is unchanged.
+  One bench row moved: `icmp_checksum` measured 101–115 ns, against 95–96 ns for 0.7.0,
+  over three back-to-back runs. The other four rows are within noise.
+- **taar `0.6.0` → `0.6.2`**, the latest taar, on cyrius 6.7.18. 0.6.2 is an audit release.
+  Its fixes cover fail-closed resolver choice, AGNOS UDP peer filtering, and TCP connect
+  and send timeouts, all in the socket and DNS half yo does not call. The bundle's
+  `ipv4` section is byte-identical to 0.6.0's. No fn or var name in the bundle is also
+  defined in yo's `src/`, so the "last definition wins" rule cannot swap a body.
+- **`cyrius.lock` is regenerated** for the new pin. It holds one commit pin, `d203629`
+  (taar 0.6.2), which matches the published tag.
+- **Sizes.** The default x86_64 build went from 187,632 to 191,784 B, and the AGNOS build
+  from 197,976 to 206,368 B. Under `CYRIUS_DCE=1`, x86_64 grew only 56 B, to 77,096 B, so
+  its growth is unreachable code. The AGNOS DCE build grew 4,296 B, to 79,392 B, and that
+  is live code. `sys_write`'s socket branch now carries 6.7.11's send-deadline logic
+  (LIB-6), and `_agnos_sock_send_left`, `_agnos_dl_left_us` and `_agnos_dl_whole_us` are
+  newly kept. yo writes only to stdout and stderr, so that branch never runs.
+
 ## [0.7.0] - 2026-11-08
 
 ### Changed
