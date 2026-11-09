@@ -4,6 +4,43 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-11-08
+
+### Changed
+
+- **Toolchain `6.6.2` → `6.6.20`.** No source change. Across the two tags the 11 stdlib
+  modules yo declares went from 233 to 254 symbols in `docs/api-surface.snapshot`, with no
+  removals and no arity changes. The 6.6.20 run passes build, the AGNOS build, tests
+  (386 assertions), bench and fuzz. Output is byte-identical to the 6.6.2 build for `--help`,
+  `-h`, no arguments, three error paths, v4 and v6 probes, a resolved name, `-q`, and a
+  timeout against `192.0.2.1`. Exit codes match too. RTT values were masked out of the
+  comparison. `lib/` is re-vendored to 29 files, each byte-identical to the 6.6.20 bundled
+  stdlib. Two of them, `poison` and `alloc_cx`, now come in transitively.
+- **taar `0.5.0` → `0.5.2`**, taar's cyrius 6.6.20 release. The `ipv4_*` surface yo uses is
+  unchanged. The bundle gained a `# Requires` block for `syscalls` and `fmt`, both of which
+  yo already declares. The rest of the diff is comments.
+- **`cyrius.lock` now records the tagged taar.** The committed lock carried taar **0.5.1**'s
+  bundle hash and no commit pin, while the manifest said `0.5.0`. The cause is the
+  `path = "../taar"` override: at cyrius 6.6.x an existing `path` wins over `git` + `tag`, so
+  local resolves vendored taar's working tree. This lock was produced in a copy staged
+  outside `~/Repos`, where the override cannot resolve, so it matches what CI resolves: the
+  0.5.2 bundle (`157081d5…`) plus commit pin `74cb83c`.
+  ⚠ A `cyrius deps`, `build` or `test` in a checkout beside `../taar` still vendors taar's
+  working tree. Today that is taar 0.6.2, which is pinned to cyrius 6.7.18. It rewrites the
+  lock's `lib/taar.cyr` hash to that bundle's and keeps the commit pin, so the lock then
+  names one taar and hashes another. Do not commit a lock produced that way. The summary
+  line tells the two resolves apart: `1 commit-pinned (1 re-verified)` means the tag was
+  checked, and `(0 re-verified)` means the override was used.
+- **Bare `cyrius test` now also runs `src/test.cyr`**, the `[build].test` entry. cyrius
+  6.6.17 made the runner read that key. The stub exits 0, so the runner reports 2 units
+  where it reported 1. The CI comment saying bare `cyrius test` picks up the `[build].test`
+  entry is now true.
+- **The default binary grew from 152,712 to 187,624 B** on x86_64, and the AGNOS build grew
+  from 150,400 to 197,960 B. Nearly all of the x86_64 growth is unreachable stdlib: 494
+  unreachable fns totalling 110,024 B, up from 439 totalling 93,490 B. `CYRIUS_DCE=1` now
+  removes them. A DCE build is 70,792 B at 6.6.2 and 77,032 B at 6.6.20, so live code grew
+  by about 6 KB. The DCE binary's output matches the default build's.
+
 ## [0.6.1] - 2026-09-11
 
 ### Changed

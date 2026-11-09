@@ -370,3 +370,78 @@ Deliberate exclusions — keeps future contributors from adding to v1.0 by accid
 - `cyrius.cyml:24-25`'s "`path` drives local dev resolution; `git`+`tag` is the published fallback" holds only
   with the switch on.
 - Reference: the cyrius guide's *Git first; local development is a switch (6.7.6)*.
+
+## Adopting cmdit (CLI parsing)
+
+**Demand-gated, not a forced sweep.** The 2026-06-25 ecosystem CLI review
+([agnosticos `planning/cmdit.md`](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/cmdit.md))
+lists yo as a Tier-1 drop-in. This note was read against cmdit 1.2.6 source on 2026-10-14. Nothing was built or run.
+yo already parses with stdlib `flags`, so this is the kii/anuenue re-fold rather than a rewrite.
+
+**Hand-rolled today:**
+
+- `src/cli.cyr:60-76`: `cli_new` makes `flags_new()` plus 11 registrations. They are a manual `-h/--help` (`:64`),
+  four ints (`-c` 4, `-W` 1000, `-i` 1000, `-s` 56; `:26-29`) and bools `-q -v -n -4 -6` plus long-only `--diag`.
+  A 96-byte index registry backs them (`:40-54`).
+- `src/cli.cyr:83-97`: `cli_parse_argv` checks, in order, `flags_parse` → `CLI_ERR_PARSE`, then help, then the four
+  `< 0` checks (`CLI_ERR_NEGATIVE`), then `-4`+`-6` (`CLI_ERR_AF_CONFLICT`), then no host
+  (`CLI_ERR_MISSING_TARGET`).
+- `src/main.cyr:17-25` is `_materialize_argv`. `:47-56` dispatches; each error writes its own line, then
+  `cli_print_usage(2)`, then exits 2.
+- `src/cli.cyr:129-144`: the synopsis and the "yo — ICMP echo probe" header go to stdout. The rows come from
+  `flags_print_help` on **stderr**. There is no `--version` anywhere in `src/`.
+
+**Site → cmdit:**
+
+- [ ] `flags_new()` → `cmdit_new("yo")`, and drop the `-h` registration and its slot (cmdit owns `-h/--help`).
+  `flags_add_int` → `cmdit_int` (same arguments). `flags_add_bool(fs,c,l,0,h)` → `cmdit_bool(fs,c,l,h)`.
+- [ ] Keep `cli_parse_argv(reg, argc, argv)` as the pure test seam, calling `cmdit_parse_argv`. `main` does
+  `n = cmdit_argv(h)` and then `cli_parse_argv(reg, n, cmdit_raw_argv(h))`. Delete `_materialize_argv`. yo has no
+  env or required flags, so no `cmdit_finalize`.
+- [ ] Map `CMDIT_HELP` → `CLI_HELP` and `CMDIT_RESULT_ERR` → `CLI_ERR_PARSE`. Missing host →
+  `cmdit_require_positionals(h, 1)`, called after the AF check to keep today's order. Keep `main.cyr`'s exact error
+  lines rather than `cmdit_print_error`.
+- [ ] Keep the post-parse `< 0` checks. `cmdit_range` rejects inside the parse loop, so `yo -h -c -3` would become
+  an error where it prints help today. The `-4`/`-6` mutex stays caller-side (cmdit v2 backlog). Neither blocks.
+- [ ] `cli_print_help` keeps its framing and swaps `flags_print_help` → `cmdit_help_flags` (same rows, same stderr).
+- [ ] **Decide the new surface.** cmdit auto-registers `-V/--version`. It does not clash with yo's `-v`, and iputils
+  `ping -V` is also version. Answer `CMDIT_VERSION` with `cmdit_version`. yo has no version string in `src/`, so
+  add one mirroring `VERSION` (whirl's `src/version.cyr` pattern).
+
+**`cyrius.cyml`:** drop `"flags"` from `[deps] stdlib`, since `src/cli.cyr` is its only user. Keep `"args"` and
+`"io"`. Add the block below. `1.3.0` is not tagged yet as of 2026-10-14, and `1.2.6` has the same API. cmdit's dist
+builds on 6.6.2, yo's pin, so no pin bump.
+
+```
+[deps.cmdit]
+git = "https://github.com/MacCracken/cmdit.git"
+tag = "1.3.0"
+modules = ["dist/cmdit.cyr"]
+```
+
+**Tests that move:** `tests/yo.tcyr` has eight `cli …` groups (`:119`, `:133`, `:144`, `:154`, `:737`, `:818`,
+`:851`, `:879`). They drive `cli_parse_argv` through `_mk_argv` (`:24`) and keep working while the `CliResult`
+wrapper stays. `:848` pins `CLI_REG_SIZE == 96` and changes when the help slot goes. If tests compare `CMDIT_*`
+directly, note that `CLI_HELP` is 1 but `CMDIT_HELP` is 2. `tests/yo.fcyr` and `tests/yo.bcyr` touch no CLI code
+(checked).
+
+**Output-identity bar:** stdout, stderr and exit code are byte-identical for a bare host, every flag in short and
+long form, the four error paths, and multi-target runs. The only intended `--help` diff is cmdit's auto rows:
+`show this help and exit` (was `show this help`) and a new `-V, --version` row. Then run
+`scripts/agnos-qemu-smoke.sh` (`:274`) for the AGNOS argv path.
+
+**Noted, not cmdit's:** `-v/--verbose` is registered (`src/cli.cyr:70`), but only `cli.cyr` and the tests read it.
+Carry it across as-is. Positionals past 128 are dropped silently by yo's 6.6.2 stdlib `flags` and by cmdit
+(`CMDIT_POS_MAX`) alike. Stdlib ≥ 6.6.5 grows instead, so adopting cmdit forgoes that fix until cmdit grows too.
+
+References: cmdit's [`README.md`](https://github.com/MacCracken/cmdit/blob/main/README.md) (API reference) and
+[`docs/development/roadmap.md`](https://github.com/MacCracken/cmdit/blob/main/docs/development/roadmap.md)
+(v2 backlog). Worked migrations: kii `src/cli.cyr`, and anuenue `src/main.cyr` (custom help around
+`cmdit_help_flags`).
+
+**Update — cmdit 1.3.1 (2026-10-14):** cmdit now grows its positional array instead of dropping past 128, and a
+refused growth is `CMDIT_ERR_NOMEM`, so adopting it no longer forgoes the stdlib 6.6.5 fix noted above. 1.3.1 also
+rejects a bool given `=value` with `CMDIT_ERR_UNEXPECTED_VALUE`. yo's vendored 6.6.2 stdlib `flags` predates both
+fixes: today `yo --verbose=0` turns verbose on and positionals past 128 are dropped. Under cmdit 1.3.1 the first
+is an error and the second keeps every host, so add both to the output-identity bar's intended diffs. Pin
+`tag = "1.3.1"` in the block above.
