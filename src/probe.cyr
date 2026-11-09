@@ -202,6 +202,15 @@ fn probe_run(target_cstr, af, addr_arg, scope_id, banner_parens,
         }
     }
 
+    # The last probe has no interval sleep after it, so look once more. On Linux
+    # this closes a microsecond window. On AGNOS the reply wait cannot be
+    # interrupted, so a SIGINT that lands during the last probe's wait is
+    # pending here; without this check the next target would start before
+    # anything noticed it.
+    if (_probe_interrupted == 0) {
+        if (platform_check_interrupted(sigfd) == 1) { _probe_interrupted = 1; }
+    }
+
     output_summary(s);
     if (diag == 1) {
         if (stats_recv(s) == 0) { platform_diag_dump(target_cstr, af); }

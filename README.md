@@ -30,7 +30,7 @@ Same shape as `ping`, Cyrius-native end to end:
 | Backend | Status | Notes |
 |---|---|---|
 | **Linux** | working (pre-1.0) | `src/platform_linux.cyr` — unprivileged SOCK_DGRAM ICMP, falls back to SOCK_RAW. Needs the caller's GID to fall inside `/proc/sys/net/ipv4/ping_group_range` for the unprivileged path. |
-| **AGNOS** | working (pre-1.0) | `src/platform_agnos.cyr` — sovereign `icmp_echo`(#55) + `udp_*`(#51-54) + `net_config`(#61). Validated on iron (agnos 1.51.7 burn: `yo google.com` 4/4 at 0% loss) and in QEMU (`scripts/agnos-qemu-smoke.sh`). Not at feature parity: no ICMPv6, no `%zone` scope IDs, no Ctrl-C, and `-W` is fixed at the kernel's ~3 s bound — see [ADR 0002](docs/adr/0002-focused-kernel-icmp-syscall.md). |
+| **AGNOS** | working (pre-1.0) | `src/platform_agnos.cyr` — sovereign `icmp_echo_ex`(#100, `icmp_echo`#55 on agnos < 1.56.48) + `udp_*`(#51-54) + `net_config`(#61, incl. the ICMP counters `--diag` prints) + `sigprocmask`/`signalfd`(#17/#18). Validated on iron (agnos 1.51.7 burn: `yo google.com` 4/4 at 0% loss) and in QEMU (`scripts/agnos-qemu-smoke.sh`). `-W` is the reply bound, capped at the kernel's 60 s (agnos ≥ 1.56.48; older kernels keep #55's fixed ~3 s). A SIGINT ends a run with its summary, but agnos raises none from the console, so Ctrl-C at the keyboard does nothing; the signal has to come from yo's parent or init, and it is seen between probes, not inside a reply wait. Not at feature parity: no ICMPv6, no `%zone` scope IDs, and the printed TTL is a nominal 64 — see [ADR 0002](docs/adr/0002-focused-kernel-icmp-syscall.md). |
 | **Windows** | post-1.0 | |
 | **Apple** | post-1.0 | |
 

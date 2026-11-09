@@ -5,15 +5,26 @@
 # CYRIUS_TARGET_AGNOS peer (cyrius >= 6.2.6). Same per-backend raw-syscall
 # posture as platform_linux.cyr — no POSIX, no lib/net.cyr tagged unions.
 #
-# THE ICMP MODEL BRIDGE. AGNOS exposes icmp_echo(dst_ip)#55 — a ONE-SHOT primitive
-# that sends an echo request, waits for the reply, and returns the RTT in ms (or
-# -1 on timeout/no-NIC) in a single blocking call. yo's surface is POSIX-shaped
-# (open -> send_to -> recv_ext). We collapse it: send_to stores the request packet
-# + target; recv_ext calls icmp_echo, then ECHOES THE STORED REQUEST BACK as the
-# reply (flip type 8->0, recompute the RFC-1071 checksum via yo's icmp_checksum) so
-# yo's parser sees a valid echo-reply matching its own id/seq/payload. yo's RTT is
-# measured host-side via platform_now_us across send_to..recv_ext, which brackets
-# the blocking icmp_echo, so it lands within the kernel's 10ms tick of the true RTT.
+# THE ICMP MODEL BRIDGE. AGNOS exposes icmp_echo_ex(dst_ip, timeout_ms)#100 — a
+# ONE-SHOT primitive that sends an echo request, waits up to timeout_ms for the
+# reply, and returns the RTT in ms (or -1 on timeout/no-NIC) in a single blocking
+# call. (#55, icmp_echo(dst_ip), is the same call with a fixed ~3 s bound; it is
+# the fallback on a kernel older than 1.56.48, which has no #100.) yo's surface is
+# POSIX-shaped (open -> send_to -> recv_ext). We collapse it: send_to stores the
+# request packet + target; recv_ext calls the echo, then ECHOES THE STORED REQUEST
+# BACK as the reply (flip type 8->0, recompute the RFC-1071 checksum via yo's
+# icmp_checksum) so yo's parser sees a valid echo-reply matching its own
+# id/seq/payload. yo's RTT is measured host-side via platform_now_us across
+# send_to..recv_ext, which brackets the blocking echo.
+#
+# SIGNALS (0.8.0). agnos has no default action for any signal but 9 / 18 / 19
+# (agnos-userland-abi.md § 4.9): SIGINT is a pending bit, nothing more. It wakes no
+# kernel wait either: neither the echo's wait nor sleep_ms#41 returns early for it
+# (only a kill or a stop interrupts those). So the interrupt watch below sees a
+# SIGINT between probes and in the sliced interval sleep, never inside a reply
+# wait; that wait is bounded by -W instead. And no console key raises SIGINT on
+# agnos: Ctrl-C at the console reaches no one. The SIGINT comes from kill#16,
+# which only yo's parent, yo itself or init may send.
 #
 # THE UDP PATH (yo resolves hostnames via DNS): listener-id based + non-blocking,
 # identical shape to dig's agnos backend.
@@ -31,8 +42,19 @@ var _AG_REQ_CAP  = 2048;           # bytes in _ag_req: 256 slots × 8 (module-sc
 var _ag_req_len  = 0;
 var _ag_req_addr = 0;
 var _ag_src_port = 0;              # bound UDP source port (single query at a time)
-var _ag_timeout_ms = 5000;
-var _ag_last_echo_rc = 0;          # last sys_icmp_echo return, for --diag
+# The two waits keep separate bounds, as the Linux arm's per-socket SO_RCVTIMEO
+# does: -W is the ICMP sentinel's, the DNS timeout the UDP listener's. One shared
+# value used to serve both, and it only reached the reply wait because probe_run
+# happens to set it after the last lookup.
+var _ag_icmp_timeout_ms = 1000;    # -W, for icmp_echo_ex#100
+var _ag_udp_timeout_ms  = 5000;    # the DNS poll loop's deadline
+var _ag_echo_ex = 0 - 1;           # icmp_echo_ex#100 present? -1 not probed yet, 0 no, 1 yes
+var _ag_last_echo_rc  = 0;         # last echo return, for --diag
+var _ag_last_echo_arm = 0;         # which echo it was: 100, 55, or 0 = none this target
+var _ag_icmp_tx0 = 0;              # net_config#61 ICMP counters when the target began,
+var _ag_icmp_rx0 = 0;              #   so --diag reports what moved during this run
+var _ag_icmp_to0 = 0;              #   rather than totals since boot
+var _ag_icmp_rs0 = 0;
 
 # --- ICMP (one-shot icmp_echo bridge) ---
 
@@ -48,9 +70,16 @@ fn platform_icmp_open_hint(af): i64 {
     return 0;
 }
 
-# Forget the previous target's --diag facts (audit finding M).
+# Forget the previous target's --diag facts (audit finding M), and sample the
+# kernel's ICMP counters so the dump can say what moved during this target.
+# Four non-blocking reads of net_config#61; -1 on a kernel without them.
 fn platform_diag_reset(): i64 {
     _ag_last_echo_rc = 0;
+    _ag_last_echo_arm = 0;
+    _ag_icmp_tx0 = sys_net_icmp_tx();
+    _ag_icmp_rx0 = sys_net_icmp_rx();
+    _ag_icmp_to0 = sys_net_icmp_timeouts();
+    _ag_icmp_rs0 = sys_net_icmp_replies_sent();
     return 0;
 }
 
@@ -58,8 +87,8 @@ fn platform_diag_reset(): i64 {
 # The request is copied into the 2048-byte _ag_req, so a longer one is refused
 # with -EMSGSIZE: it used to be copied whole, and `-s 2041` and up overwrote
 # _ag_req_len, then _ag_req_addr (the ping went to the payload's bytes), then
-# the DNS globals after them (audit finding D). The kernel's icmp_echo#55 sends
-# its own fixed payload anyway, so -s only shapes the synthesised reply here.
+# the DNS globals after them (audit finding D). The kernel's echo (#100 or #55)
+# sends its own fixed payload anyway, so -s only shapes the synthesised reply here.
 fn platform_icmp_send_to(fd, packed_addr, pkt, pkt_len): i64 {
     if ((pkt_len < 0) || (pkt_len > _AG_REQ_CAP)) { return 0 - 90; }
     _ag_req_addr = packed_addr;
@@ -69,12 +98,26 @@ fn platform_icmp_send_to(fd, packed_addr, pkt, pkt_len): i64 {
     return pkt_len;
 }
 
-# Do the ping (icmp_echo), then synthesize the echo-reply by handing the stored
+# Send the stored request and wait for its reply: icmp_echo_ex#100 with -W as
+# the bound, or, on a kernel without #100, icmp_echo#55 and its fixed ~3 s.
+# Which one is probed once per process (platform_echo_ex_available). Returns
+# the kernel's RTT in ms, or -1 on timeout / NIC down.
+fn _ag_echo(): i64 {
+    if (_ag_echo_ex < 0) { _ag_echo_ex = platform_echo_ex_available(sys_net_icmp_tx()); }
+    if (_ag_echo_ex == 1) {
+        _ag_last_echo_arm = 100;
+        return sys_icmp_echo_ex(_ag_req_addr, platform_echo_timeout_ms(_ag_icmp_timeout_ms));
+    }
+    _ag_last_echo_arm = 55;
+    return sys_icmp_echo(_ag_req_addr);
+}
+
+# Do the ping (_ag_echo), then synthesize the echo-reply by handing the stored
 # request back with type 8->0 + a recomputed checksum. ttl_out (if non-zero) gets
-# a nominal 64 — icmp_echo doesn't surface the reply TTL. Returns reply length, or
+# a nominal 64 — the echo doesn't surface the reply TTL. Returns reply length, or
 # -11 (-EAGAIN, mirrors SO_RCVTIMEO) on timeout.
 fn _ag_icmp_pong(buf, maxlen, ttl_out): i64 {
-    var rtt = sys_icmp_echo(_ag_req_addr);
+    var rtt = _ag_echo();
     _ag_last_echo_rc = rtt;
     if (rtt < 0) { return 0 - 11; }
     var n = _ag_req_len;
@@ -92,7 +135,7 @@ fn _ag_icmp_pong(buf, maxlen, ttl_out): i64 {
 
 # Plain recv: the echo bridge without a TTL out.
 fn platform_icmp_recv(fd, buf, maxlen): i64 { return _ag_icmp_pong(buf, maxlen, 0); }
-# Run icmp_echo#55 and hand back the synthesised reply; TTL out is a nominal 64.
+# Run the echo (#100, or #55) and hand back the synthesised reply; TTL out is a nominal 64.
 fn platform_icmp_recv_ext(fd, buf, maxlen, ttl_out): i64 { return _ag_icmp_pong(buf, maxlen, ttl_out); }
 
 # --- UDP (DNS resolution) ---
@@ -136,7 +179,7 @@ fn platform_udp_send_to(fd, packed_addr, port, pkt, pkt_len): i64 {
 # the wait continues (audit finding K; the layout is platform_peer_match's).
 # Polls at least once. Returns bytes, a kernel error, or -11 (-EAGAIN) on expiry.
 fn platform_udp_recv(fd, buf, maxlen): i64 {
-    var deadline = sys_uptime_ms() + _ag_timeout_ms;
+    var deadline = sys_uptime_ms() + _ag_udp_timeout_ms;
     var from[16];
     while (1) {
         store64(&from, 0);
@@ -160,9 +203,15 @@ fn platform_close(fd): i64 {
     return sys_udp_unbind(fd);                 # else a UDP listener
 }
 
-# Record the timeout the UDP poll loop uses (it cannot reach icmp_echo#55).
+# Record a reply-wait bound for `fd`: on the ICMP sentinel it is -W, which
+# icmp_echo_ex#100 enforces in the kernel; on a UDP listener it is the DNS poll
+# loop's deadline. Per fd, as SO_RCVTIMEO is on Linux.
 fn platform_set_recv_timeout_ms(fd, timeout_ms): i64 {
-    _ag_timeout_ms = timeout_ms;
+    if (fd >= _AG_ICMP_FD) {
+        _ag_icmp_timeout_ms = timeout_ms;
+        return 0;
+    }
+    _ag_udp_timeout_ms = timeout_ms;
     return 0;
 }
 
@@ -210,29 +259,87 @@ fn platform_icmp6_send_to(fd, addr16, scope_id, pkt, pkt_len): i64 { return 0 - 
 fn platform_icmp6_recv_ext(fd, buf, maxlen, hop_out): i64 { return 0 - 1; }
 
 # No interface-index / netlink concept exposed to ring 3 — 0 = unscoped/default.
-# No raw-socket concept on AGNOS — icmp_echo#55 matches the reply in-kernel and
-# _ag_icmp_pong synthesises it locally, so there is never a foreign frame to
-# filter out.
+# No raw-socket concept on AGNOS — the kernel echo matches the reply in-kernel
+# (by id and sequence) and _ag_icmp_pong synthesises it locally, so there is
+# never a foreign frame to filter out.
 fn platform_icmp_raw_mode(): i64 { return 0; }
 
 # No interface indexes in ring 3: always 0 (unscoped).
 fn platform_resolve_ifindex(name): i64 { return 0; }
 
-# Ctrl-C is not wired on AGNOS yet (the kernel has sigprocmask#17 / signalfd#18;
-# roadmap). Install reports unavailable and the check never fires.
-fn platform_install_interrupt_watch(): i64 { return 0 - 1; }
-# Nothing to undo: no watch is installed on agnos.
-fn platform_remove_interrupt_watch(sigfd): i64 { return 0; }
-# Never interrupted on agnos (no ring-3 signal wiring yet).
-fn platform_check_interrupted(fd): i64 { return 0; }
+# --- the interrupt watch (SIGINT through signalfd#18) -----------------
 
-# There is nothing to wait on: icmp_echo#55 blocks inside recv_ext, so the
-# "socket" is always ready to be read. Never reports an interrupt.
+var _ag_sigmask[1];                # 8 B: the SIGINT set for sigprocmask#17 / signalfd#18
+var _ag_sigrec[1];                 # 8 B: one signalfd record (the kernel writes a u32 signo)
+
+# The SIGINT set, built by the stdlib's agnos sigset_add. ⚠ agnos sets are
+# `1 << sig` (bit 2 for SIGINT), not Linux's `1 << (sig - 1)`; the agnos peer's
+# sigset_add encodes that, so the bit is never spelled out here.
+fn _ag_sigint_set(): i64 {
+    store64(&_ag_sigmask, 0);
+    sigset_add(&_ag_sigmask, SIGINT);
+    return &_ag_sigmask;
+}
+
+# Watch for SIGINT: block it (sigprocmask#17), then open a signalfd#18 on it,
+# the shape agnos-userland-abi.md § 4.9 gives. The block changes no delivery
+# (SIGINT has no default action on agnos to suppress); it keeps a future
+# epoll_wait#21 from answering -4 for a signal this watch consumes. Returns the
+# signalfd, or -1, with the mask restored when the signalfd cannot be had.
+fn platform_install_interrupt_watch(): i64 {
+    var set = _ag_sigint_set();
+    if (sys_sigprocmask(SIG_BLOCK, set, 0) < 0) { return 0 - 1; }
+    var fd = sys_signalfd(0 - 1, set, SFD_NONBLOCK);
+    if (fd < 0) {
+        sys_sigprocmask(SIG_UNBLOCK, set, 0);
+        return 0 - 1;
+    }
+    return fd;
+}
+
+# Undo platform_install_interrupt_watch: close the signalfd and unblock SIGINT.
+# A SIGINT that lands after this stays pending, and the next target's watch
+# reads it at its first check, so it still stops the run there.
+fn platform_remove_interrupt_watch(sigfd): i64 {
+    if (sigfd < 0) { return 0; }
+    sys_close(sigfd);
+    sys_sigprocmask(SIG_UNBLOCK, _ag_sigint_set(), 0);
+    return 0;
+}
+
+# Non-blocking: 1 if a SIGINT was pending (the read consumes it), else 0. A
+# signalfd read never waits on agnos (it answers 4 bytes or 0), and
+# sys_read_nb says so anyway. A negative fd (no watch) is never interrupted.
+fn platform_check_interrupted(fd): i64 {
+    if (fd < 0) { return 0; }
+    if (sys_read_nb(fd, &_ag_sigrec, 8) > 0) { return 1; }
+    return 0;
+}
+
+# There is nothing to wait on: the echo blocks inside recv_ext, so the "socket"
+# is always ready to be read. ⚠ That wait cannot be interrupted. A SIGINT does
+# not end it; only kill 9 does. So it runs to the reply or to -W, and the
+# signal is seen by the check that follows: the interval sleep, the next
+# probe's check, or the post-loop check in probe_run.
 fn platform_wait_readable(fd, sigfd, timeout_ms): i64 { return 1; }
 
-# A plain sleep: no signal to wake it. Never reports an interrupt.
+# Sleep for ms milliseconds unless SIGINT arrives first: 1 when interrupted
+# (the signal is consumed), else 0. A signal wakes no sleep_ms#41 on agnos, so
+# the sleep runs in slices of at most PLATFORM_SLEEP_SLICE_MS against an
+# absolute deadline, checking the signalfd before each slice and once more at
+# the end. A SIGINT is therefore seen within one slice plus a timer tick, and
+# the slices do not add up to more than the interval. Without a watch
+# (sigfd < 0) it is a plain sleep.
 fn platform_sleep_interruptible(sigfd, ms): i64 {
-    platform_sleep_ms(ms);
+    if (ms <= 0) { return platform_check_interrupted(sigfd); }
+    if (sigfd < 0) { platform_sleep_ms(ms); return 0; }
+    var deadline = sys_uptime_ms() + ms;
+    while (1) {
+        if (platform_check_interrupted(sigfd) == 1) { return 1; }
+        var left = deadline - sys_uptime_ms();
+        if (left <= 0) { return 0; }
+        sys_sleep_ms(platform_sleep_slice_ms(left));
+    }
     return 0;
 }
 
@@ -250,10 +357,13 @@ fn platform_sleep_interruptible(sigfd, ms): i64 {
 # That single line separates "yo is broken" from "the box has no network",
 # which is the first fork in every AGNOS net debug.
 #
-# NOTE: kernel ICMP counters now exist — agnos 1.56.48 added icmp_tx / icmp_rx /
-# icmp_replies_sent / icmp_timeouts as net_config#61 fields 4..7, and the
-# vendored stdlib wraps them (sys_net_icmp_*). This dump does not show them
-# yet; that is roadmap work together with icmp_echo_ex#100 for -W.
+# The second fork is the ICMP counters, net_config#61 fields 4..7 (agnos
+# 1.56.48): did an echo request leave this host at all? tx moving with rx
+# still is the network or the target; tx not moving is a local fault. They
+# are kernel-wide and count from boot, so the dump prints how far each moved
+# during this target (sampled at platform_diag_reset) beside its total. A
+# second process pinging at the same time moves them too; the verdict names
+# that case when it can see it (rx moved, but yo got nothing).
 fn platform_diag_dump(target, af): i64 {
     output_diag_open(target, af);
     output_diag_kv("backend         ", "agnos (sovereign syscalls)");
@@ -272,12 +382,57 @@ fn platform_diag_dump(target, af): i64 {
         output_diag_kv("diagnosis       ", "no DHCP lease — the NIC never configured; nothing could have been sent");
     }
 
-    # icmp_echo(#55) returns RTT in ms (>= 0) or -1 on timeout / NIC down.
-    if (_ag_last_echo_rc < 0) {
-        output_diag_kv("icmp_echo #55   ", "-1 (timed out at the kernel's fixed ~3 s bound, or NIC down)");
+    if (af != 6) { _ag_diag_echo(); }
+    return 0;
+}
+
+# The --diag lines for the last echo and the ICMP counters (IPv4 only: the v6
+# path never reaches the kernel).
+fn _ag_diag_echo(): i64 {
+    # The echo returns RTT in ms (>= 0) or -1 on timeout / NIC down.
+    if (_ag_last_echo_arm == 0) {
+        output_diag_kv("icmp echo       ",
+            "not called (no request reached the kernel: every send was refused, or the run ended first)");
     }
-    if (_ag_last_echo_rc >= 0) {
-        output_diag_kv_int("icmp_echo #55   ", _ag_last_echo_rc);
+    if (_ag_last_echo_arm == 100) {
+        output_diag_kv_int("echo timeout ms ", platform_echo_timeout_ms(_ag_icmp_timeout_ms));
+        if (_ag_last_echo_rc < 0) {
+            output_diag_kv("icmp_echo_ex#100", "-1 (no reply within the timeout above, or NIC down)");
+        }
+        if (_ag_last_echo_rc >= 0) { output_diag_kv_int("icmp_echo_ex#100", _ag_last_echo_rc); }
+    }
+    if (_ag_last_echo_arm == 55) {
+        output_diag_kv("note            ",
+            "this kernel has no icmp_echo_ex#100 (agnos < 1.56.48), so -W was not applied");
+        if (_ag_last_echo_rc < 0) {
+            output_diag_kv("icmp_echo #55   ", "-1 (timed out at the kernel's fixed ~3 s bound, or NIC down)");
+        }
+        if (_ag_last_echo_rc >= 0) { output_diag_kv_int("icmp_echo #55   ", _ag_last_echo_rc); }
+    }
+
+    var tx = sys_net_icmp_tx();
+    var rx = sys_net_icmp_rx();
+    var v = platform_icmp_verdict(_ag_icmp_tx0, tx, _ag_icmp_rx0, rx);
+    if (v == PLATFORM_ICMP_UNKNOWN) {
+        output_diag_kv("icmp counters   ", "unavailable (agnos < 1.56.48 has none)");
+        return 0;
+    }
+    # Fields 4..7 arrived together, so known tx/rx means known timeouts too.
+    output_diag_kv_counter("icmp tx         ", _ag_icmp_tx0, tx);
+    output_diag_kv_counter("icmp rx         ", _ag_icmp_rx0, rx);
+    output_diag_kv_counter("icmp timeouts   ", _ag_icmp_to0, sys_net_icmp_timeouts());
+    output_diag_kv_counter("pings answered  ", _ag_icmp_rs0, sys_net_icmp_replies_sent());
+    if (v == PLATFORM_ICMP_NONE_SENT) {
+        output_diag_kv("verdict         ",
+            "no echo request left this host: a local fault (NIC down, no route, send failed), not the network");
+    }
+    if (v == PLATFORM_ICMP_NO_REPLY) {
+        output_diag_kv("verdict         ",
+            "requests left this host and no reply matched: the path or the target dropped them");
+    }
+    if (v == PLATFORM_ICMP_OTHER_REPLY) {
+        output_diag_kv("verdict         ",
+            "the kernel matched replies, none of them yo's: another process was pinging; re-run alone");
     }
     return 0;
 }

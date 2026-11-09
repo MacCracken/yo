@@ -23,6 +23,20 @@
 #   load-bearing : /bin/yo loads and runs in ring 3 (its banner reaches serial)
 #   load-bearing : it prints a summary line, no #PF / PANIC
 #   load-bearing : replies received, 0% loss   [see SLIRP note]
+#   load-bearing : -s 3000 is refused with EMSGSIZE (audit D)
+#   load-bearing : -W is the reply bound (icmp_echo_ex#100): two probes at -W 500
+#                  against an unreachable address take ~1 s, not #55's ~6 s
+#   load-bearing : --diag prints the ICMP counters for this run (tx moved by 2,
+#                  rx did not) and says the requests left the host
+#   load-bearing : SIGINT ends a run: in the interval sleep within ~one slice,
+#                  with a summary; during the last probe's reply wait, without
+#                  starting the next target
+#
+# THE SIGINT HELPER. agnos lets only a process's parent, the process itself or
+# init signal it, no console key raises SIGINT, and agnsh has no kill builtin.
+# tests/agnos/yosmoke.cyr is a small parent that spawns yo, signals it and
+# times it; it goes on the image as /bin/yosmoke. It times the -W run too, so
+# the measurement stays inside the guest, away from QMP typing and serial polling.
 #
 # SLIRP NOTE. QEMU user-mode networking forwards guest ICMP through a host ping
 # socket, which needs the host's net.ipv4.ping_group_range to include the calling
@@ -43,6 +57,9 @@ AGNOSHI_ROOT="${AGNOSHI_ROOT:-$ROOT/../agnoshi}"
 # 10.0.2.2 is the SLIRP gateway — the only host reliably reachable from a
 # user-mode-networked guest with no outbound assumptions.
 TARGET="${YO_SMOKE_TARGET:-10.0.2.2}"
+# An address nothing answers: TEST-NET-1 (RFC 5737) is never routed. SLIRP hands
+# the echo to a host ping socket, and it dies there or upstream.
+UNREACH="${YO_SMOKE_UNREACH:-192.0.2.1}"
 COUNT="${YO_SMOKE_COUNT:-2}"
 PROMPT="${YO_SMOKE_PROMPT:-\[ASSIST\] >}"
 BOOT_TIMEOUT="${YO_SMOKE_BOOT_TIMEOUT:-120}"
@@ -83,6 +100,9 @@ echo "  building yo for the agnos target..."
     || { echo "  FAIL: cyrius build --agnos failed"; exit 1; }
 YO_BIN="$ROOT/build/yo-agnos"
 [ -f "$YO_BIN" ] || { echo "  FAIL: $YO_BIN missing after build"; exit 1; }
+( cd "$ROOT" && cyrius build --agnos tests/agnos/yosmoke.cyr build/yosmoke-agnos ) >/dev/null 2>&1 \
+    || { echo "  FAIL: cyrius build --agnos of tests/agnos/yosmoke.cyr failed"; exit 1; }
+YOSMOKE_BIN="$ROOT/build/yosmoke-agnos"
 
 # Can the host forward guest ICMP at all? See SLIRP NOTE.
 PGR="$(cat /proc/sys/net/ipv4/ping_group_range 2>/dev/null || echo '1 0')"
@@ -94,7 +114,7 @@ if [ "$MYGID" -lt "$PGR_LO" ] || [ "$MYGID" -gt "$PGR_HI" ]; then SLIRP_ICMP=0; 
 
 echo "  agnos kernel : $AGNOS_KERNEL ($(stat -c%s "$AGNOS_KERNEL") B)"
 echo "  yo (agnos)   : $YO_BIN ($(stat -c%s "$YO_BIN") B)"
-echo "  target       : $TARGET (count=$COUNT)"
+echo "  target       : $TARGET (count=$COUNT) · unreachable: $UNREACH"
 echo "  host ICMP    : gid=$MYGID vs ping_group_range='$PGR' -> slirp_icmp=$SLIRP_ICMP"
 echo ""
 
@@ -109,7 +129,8 @@ IMG="$WORK/agnos-yo.img"
 SEED="$WORK/seed"; mkdir -p "$SEED/bin"
 cp "$AGNSH"  "$SEED/bin/agnsh"
 cp "$YO_BIN" "$SEED/bin/yo"
-chmod +x "$SEED/bin/agnsh" "$SEED/bin/yo"
+cp "$YOSMOKE_BIN" "$SEED/bin/yosmoke"
+chmod +x "$SEED/bin/agnsh" "$SEED/bin/yo" "$SEED/bin/yosmoke"
 
 PART_OFFSET=$(( 33 * 1048576 ))
 PART_BYTES=$(( 67 * 1048576 ))
@@ -215,6 +236,8 @@ QCODE = {
 }
 for c in 'abcdefghijklmnopqrstuvwxyz0123456789':
     QCODE[c] = c
+for c in 'abcdefghijklmnopqrstuvwxyz':
+    QCODE[c.upper()] = 'shift+' + c            # -W
 
 s = socket.socket(socket.AF_UNIX)
 s.connect(sock_path)
@@ -322,12 +345,52 @@ else
     fail "QMP send-key failed (second command)"
 fi
 
+# Type a command and wait for the prompt to come back. A run that does not
+# return in time is reported by its own assertions below (its yosmoke line is
+# missing); the INFO says why the later output may be mangled.
+run_cmd() {
+    _before="$(prompt_count)"
+    echo "  typing: $1"
+    if type_line "$1"; then
+        wait_for_prompt_return "$_before" "$2" || echo "  INFO: prompt did not return within ${2}s after: $1"
+    else
+        fail "QMP send-key failed: $1"
+    fi
+}
+
+# -W through icmp_echo_ex#100, timed in the guest, with the --diag counters. Two
+# probes, -W 500, no interval: ~1 s. On #55 each would wait its fixed ~3 s.
+CMD3="yosmoke time /bin/yo -c 2 -W 500 -i 0 -n -s 24 --diag $UNREACH"
+run_cmd "$CMD3" 30
+
+# SIGINT in the interval sleep. -i 2000 puts 3200 ms mid-sleep whether or not
+# replies come back (probes at 0/2000 with replies, 0/2500 without), so a
+# sliced sleep sees it within ~one 50 ms slice and a whole 2 s sleep would not.
+CMD4="yosmoke sigint 3200 /bin/yo -c 30 -W 500 -i 2000 -n -s 40 $TARGET"
+run_cmd "$CMD4" 30
+
+# SIGINT during the last probe's reply wait, with a second target queued. The
+# wait cannot be interrupted on agnos, so yo sees the signal when it ends; the
+# second target must not start (probe_run's post-loop check).
+CMD5="yosmoke sigint 700 /bin/yo -c 1 -W 2000 -n -s 41 $UNREACH $TARGET"
+run_cmd "$CMD5" 30
+
 cleanup; trap - EXIT
+
+# The serial lines a typed command printed: everything after the line that
+# echoes it, up to the next prompt. ENVIRON, not -v: awk would read the
+# backslashes in $PROMPT as escapes.
+segment() { logtext | C="$1" P="$PROMPT" awk 'f && $0 ~ ENVIRON["P"] { exit } f { print } index($0, ENVIRON["C"]) { f = 1 }'; }
+
+# A field of a run's `yosmoke: <mode> exit=E ms=M kill=K done` line, or empty.
+ys_field() { segment "$1" | sed -n "s/.*yosmoke: [a-z]* .*$2=\(-\{0,1\}[0-9]*\).* done.*/\1/p" | head -1; }
 
 echo ""
 echo "  --- yo output ---"
-logtext | sed -n "/^yo $TARGET/,/% loss/p" | sed 's/^/  /'
-logtext | grep -a -A 10 -- '--- diag:' | sed 's/^/  /'
+for _c in "$CMD" "$CMD2" "$CMD3" "$CMD4" "$CMD5"; do
+    echo "  > $_c"
+    segment "$_c" | sed 's/^/    /'
+done
 echo ""
 
 # --- assertions -------------------------------------------------------
@@ -362,7 +425,7 @@ LOSS_LINE="$(logtext | grep -a '% loss' | head -1)"
 # match reported PASS on a 100%-loss run, which is the one result this gate
 # exists to catch. Require a non-digit (or start of line) before the 0.
 if echo "$LOSS_LINE" | grep -qaE '(^|[^0-9])0% loss'; then
-    pass "0% loss — icmp_echo#55 round-tripped: $LOSS_LINE"
+    pass "0% loss — the kernel echo round-tripped: $LOSS_LINE"
 else
     if [ "$SLIRP_ICMP" -eq 1 ]; then
         fail "replies expected (this host CAN forward guest ICMP) but got: ${LOSS_LINE:-<none>}"
@@ -370,6 +433,90 @@ else
         echo "  INFO: no replies, and this host cannot forward guest ICMP"
         echo "        (gid $MYGID outside ping_group_range '$PGR') — reply gate not asserted."
         echo "        Widen with: sysctl -w net.ipv4.ping_group_range='0 2147483647'"
+    fi
+fi
+
+# --- 0.8.0: -W, the --diag counters, SIGINT --------------------------------
+
+# -W: two 500 ms waits, so >= 1000 ms (the kernel bound is never early) and well
+# under 2000 ms, which is what -W's 1000 ms default would take. #55 takes ~6 s.
+W_MS="$(ys_field "$CMD3" ms)"
+if [ -z "$W_MS" ]; then
+    fail "-W run: no yosmoke line (did /bin/yosmoke run?)"
+elif [ "$W_MS" -ge 950 ] && [ "$W_MS" -lt 1700 ]; then
+    pass "-W 500 is the reply bound: 2 lost probes took $W_MS ms (icmp_echo_ex#100)"
+else
+    fail "-W 500 × 2 lost probes took $W_MS ms; expected ~1000 (#55's fixed bound is ~3000 each)"
+fi
+if segment "$CMD3" | grep -qaE 'echo timeout ms *: 500$'; then
+    pass "--diag names the bound #100 was given (500 ms)"
+else
+    fail "--diag has no 'echo timeout ms: 500' line"
+fi
+if segment "$CMD3" | grep -qaE 'icmp tx *: 2 this run \([0-9]+ since boot\)'; then
+    pass "--diag: icmp tx moved by exactly this run's 2 requests"
+else
+    fail "--diag: no 'icmp tx: 2 this run (N since boot)' line"
+fi
+if segment "$CMD3" | grep -qaE 'icmp rx *: 0 this run'; then
+    pass "--diag: icmp rx did not move"
+else
+    fail "--diag: no 'icmp rx: 0 this run' line"
+fi
+if segment "$CMD3" | grep -qa 'verdict *: requests left this host and no reply matched'; then
+    pass "--diag verdict: sent, nothing came back — a network fault, not a local one"
+else
+    fail "--diag gave no 'requests left this host' verdict"
+fi
+
+# SIGINT in the interval sleep: seen within a slice, and yo still summarises.
+S_MS="$(ys_field "$CMD4" ms)"
+S_KILL="$(ys_field "$CMD4" kill)"
+S_EXIT="$(ys_field "$CMD4" exit)"
+S_SENT="$(segment "$CMD4" | sed -n 's/^\([0-9][0-9]*\) sent .*% loss.*/\1/p' | head -1)"
+if [ -z "$S_MS" ]; then
+    fail "SIGINT run (sleep): no yosmoke line — yo did not stop within the wait"
+elif [ "$S_KILL" != "0" ]; then
+    fail "SIGINT run (sleep): kill#16 answered $S_KILL"
+elif [ "$S_MS" -lt 400 ]; then
+    pass "SIGINT in the interval sleep ended yo in $S_MS ms (sliced sleep)"
+else
+    fail "SIGINT in the interval sleep took $S_MS ms to end yo; expected < 400 (one 50 ms slice)"
+fi
+if [ -n "$S_SENT" ] && [ "$S_SENT" -ge 1 ] && [ "$S_SENT" -lt 30 ]; then
+    pass "the interrupted run printed its summary: $S_SENT of 30 sent"
+else
+    fail "the interrupted run printed no summary with fewer than 30 sent (got '${S_SENT}')"
+fi
+if [ -n "$S_EXIT" ] && [ "$S_EXIT" -lt 256 ]; then
+    pass "yo exited normally after SIGINT (status $S_EXIT), not by the signal"
+else
+    fail "yo's wait status after SIGINT was '${S_EXIT}'"
+fi
+
+# SIGINT during the last probe's reply wait, with a second target queued.
+L_MS="$(ys_field "$CMD5" ms)"
+if [ -z "$L_MS" ]; then
+    fail "SIGINT run (reply wait): no yosmoke line"
+else
+    if segment "$CMD5" | grep -qa "^yo $TARGET — 41 bytes"; then
+        fail "SIGINT during the last reply wait: the second target started anyway"
+    else
+        pass "SIGINT during the last reply wait: the run stopped before the second target"
+    fi
+    if segment "$CMD5" | grep -qaE "^1 sent .* 100% loss"; then
+        pass "the first target's probe finished and was summarised"
+    else
+        fail "no '1 sent · 0 received · 100% loss' summary for the first target"
+    fi
+    # Informational: agnos does not wake the echo for an ordinary signal, so the
+    # wait runs to -W (2000 ms from the start; ~1300 ms after a signal at 700).
+    if [ "$L_MS" -lt 1000 ]; then
+        echo "  INFO: the reply wait ended ${L_MS} ms after SIGINT, before -W. Either -W did not"
+        echo "        reach the echo (see the -W run above), or agnos now interrupts the echo on a"
+        echo "        signal, and platform_wait_readable's note is stale."
+    else
+        echo "  INFO: the reply wait ran to -W, ${L_MS} ms after SIGINT (no ring-3 way to cut it short)"
     fi
 fi
 

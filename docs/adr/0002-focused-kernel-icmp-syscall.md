@@ -87,3 +87,35 @@ This is not a bug — the kernel did the matching, which is precisely the deal t
 **Mirroring yo's `platform_*` surface 1:1 in the ABI.** Raised in `state.md` § Kernel coupling as a live option — the kernel could expose exactly `platform_icmp_open` / `_send_to` / `_recv_ext`. Rejected: that surface is itself a POSIX artifact, shaped by `SO_RCVTIMEO` and `IP_RECVTTL` in `platform_linux.cyr`. Adopting it as the sovereign ABI imports POSIX through the back door and lets a leaf tool author a kernel interface. The Linux backend is a reference for what yo *needs*, not a template for what the kernel should *be*.
 
 **Enforcing `-W` host-side — call #55 and abandon it after `timeout_ms`.** Rejected: it cannot be built. #55 blocks in the kernel, and there is no ring-3 way to interrupt it — AGNOS has no ring-3 signal infrastructure, which is why `platform_install_interrupt_watch` returns `-1` and `platform_check_interrupted` never fires (`platform_agnos.cyr:162`). A host-side timeout would need a timer and a cancellation path that do not exist. Parameterising the kernel's bound is the only real version of this.
+
+## Update — 2026-11-08, yo 0.8.x
+
+The kernel took the move § Neutral named as preferred, with one change of form,
+and yo has adopted it. This decision stands; three of its consequences moved.
+
+- **Cost 1 is retired on agnos ≥ 1.56.48.** agnos added `icmp_echo_ex(dst_ip,
+  timeout_ms)` as a **new number, #100**, rather than a second argument to #55.
+  The compiler does not zero the argument registers a call leaves unused, so
+  reading a2 in the #55 arm would have handed every shipped one-argument caller
+  a garbage bound. Arity is part of a syscall's ABI here. yo now passes `-W`
+  (clamped to the kernel's 60 s) through `sys_icmp_echo_ex`. On an older kernel
+  #100 answers -1, which reads as a timeout, so yo probes once
+  (`net_config`#61 field 4, from the same agnos commit) and falls back to #55.
+- **The counters ask is met.** `net_config`#61 fields 4..7 are `icmp_tx`,
+  `icmp_rx`, `icmp_replies_sent` and `icmp_timeouts`, and the AGNOS `--diag`
+  prints how far each moved during the run. The Neutral bullet that called them
+  a kernel ask is history.
+- **The concurrency hazard is closed in the kernel.** agnos 1.56.48 matches the
+  reply on identifier *and* sequence. 1.57.7 gives each process its own wait
+  slot, so concurrent pingers each get their own reply, and a late reply no
+  longer matches anything.
+- **The host-side `-W` alternative is still rejected, for a narrower reason.**
+  Ring-3 signal infrastructure now exists (`sigprocmask`#17 / `signalfd`#18), and
+  yo uses it for SIGINT. But an ordinary signal is a pending bit on agnos, with
+  no default action, and it wakes no kernel wait; only kill and stop interrupt
+  one. The echo's wait still cannot be abandoned from ring 3, which is why yo
+  sees a SIGINT only between probes.
+
+Costs 2 to 4 stand: the RTT floor, the synthesised reply and the nominal TTL.
+The floor is lower than it was. Since agnos 1.57.7 `uptime_ms`#40 is the
+calibrated TSC, so yo's host-side RTT has 1 ms resolution, not 10 ms.

@@ -22,4 +22,4 @@ Decisions about yo — what we chose, the context, and the consequences we accep
 | ADR | Status | Decision |
 |---|---|---|
 | [0001](0001-per-backend-sovereignty.md) — Per-backend sovereignty | Accepted | Linux uses the host's POSIX socket surface pragmatically; the AGNOS backend uses sovereign kernel syscalls only. Sovereignty is enforced **per backend**, not project-wide. |
-| [0002](0002-focused-kernel-icmp-syscall.md) — Focused kernel ICMP syscall | Accepted | agnos exposes one-shot `icmp_echo(dst) → rtt_ms` rather than a general send/recv surface, and yo adapts to that shape. Costs `-W` and real TTL on that backend. |
+| [0002](0002-focused-kernel-icmp-syscall.md) — Focused kernel ICMP syscall | Accepted | agnos exposes one-shot `icmp_echo(dst) → rtt_ms` rather than a general send/recv surface, and yo adapts to that shape. Costs a real TTL on that backend; `-W` came back with `icmp_echo_ex`#100 (update, 0.8.x). |

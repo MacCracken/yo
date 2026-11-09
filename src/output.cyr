@@ -317,6 +317,21 @@ fn output_diag_kv_int(label, n): i64 {
     return 0;
 }
 
+# `  <label>: <delta> this run (<total> since boot)`, for a kernel counter
+# sampled when the target began (`before`) and when the dump runs (`now`). The
+# AGNOS ICMP counters are kernel-wide and never reset, so the total alone would
+# mix this run with every earlier one.
+fn output_diag_kv_counter(label, before, now): i64 {
+    _output_puts("  ");
+    _output_puts(label);
+    _output_puts(": ");
+    fmt_int(now - before);
+    _output_puts(" this run (");
+    fmt_int(now);
+    _output_puts(" since boot)\n");
+    return 0;
+}
+
 # `  <label>: a.b.c.d`. Renders 0 as "unset" rather than "0.0.0.0" — on
 # AGNOS an unset net_config field means "DHCP never leased", which is a
 # different fact from a genuine all-zero address and is usually THE

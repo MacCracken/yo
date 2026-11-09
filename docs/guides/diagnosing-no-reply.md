@@ -247,33 +247,47 @@ That is a genuine network timeout. The host is down, the reply is filtered, or
 
 The AGNOS backend (`src/platform_agnos.cyr`) shares no code with the Linux one —
 per-backend sovereignty. No POSIX, no sockets: sovereign ring-3 syscalls through
-the cyrius wrappers (`sys_icmp_echo`#55, `sys_udp_bind`/`send`/`recv`/`unbind`
-#51-54, `sys_net_dns_server`#61 field 3, `sys_uptime_ms`#40, `sys_sleep_ms`#41).
+the cyrius wrappers (`sys_icmp_echo_ex`#100, or `sys_icmp_echo`#55 on an agnos
+older than 1.56.48; `sys_udp_bind`/`send`/`recv`/`unbind` #51-54; `sys_net_*`
+#61; `sys_sigprocmask`/`sys_signalfd` #17/#18; `sys_uptime_ms`#40,
+`sys_sleep_ms`#41).
 
-`--diag` matters more here than on Linux, and that is why the flag exists at all
-(`platform_agnos.cyr:170-189`). On agnos there is no `ip addr`, no `dmesg`, no
-second terminal. When a probe returns nothing on iron you have the serial console
-and whatever the tool prints — so the tool prints the network state itself.
+`--diag` matters more here than on Linux, and that is why the flag exists at all.
+On agnos there is no `ip addr`, no `dmesg`, no second terminal. When a probe
+returns nothing on iron you have the serial console and whatever the tool prints
+— so the tool prints the network state itself.
 
 ### Worked example — a real capture
 
-From the QEMU smoke against `10.0.2.99`, an address with nothing behind it:
+From the QEMU smoke (0.8.x), `yo -c 2 -W 500 -i 0 -n --diag 192.0.2.1`. That is
+TEST-NET-1, which nothing answers:
 
 ```
-  --- diag: no reply from 10.0.2.99 (IPv4) ---
+yo 192.0.2.1 — 24 bytes
+  seq=0  timeout
+  seq=1  timeout
+2 sent · 0 received · 100% loss
+  --- diag: no reply from 192.0.2.1 (IPv4) ---
   backend         : agnos (sovereign syscalls)
   net ip          : 10.0.2.15
   netmask         : 255.255.255.0
   gateway         : 10.0.2.2
   dns server      : 10.0.2.3
-  icmp_echo #55   : -1 (timed out at the kernel's fixed ~3 s bound, or NIC down)
+  echo timeout ms : 500
+  icmp_echo_ex#100: -1 (no reply within the timeout above, or NIC down)
+  icmp tx         : 2 this run (4 since boot)
+  icmp rx         : 0 this run (2 since boot)
+  icmp timeouts   : 2 this run (2 since boot)
+  pings answered  : 0 this run (0 since boot)
+  verdict         : requests left this host and no reply matched: the path or the target dropped them
 ```
 
-Healthy lease, echo timed out. The box's network is fine; that address is empty.
+The lease is healthy, both requests left the host, and nothing came back. The
+box's network is fine; nothing at that address answers.
 
 ### The first fork is the lease
 
-All four `net_config`#61 fields are populated by the DHCP ACK (agnos
+All four `net_config`#61 address fields are populated by the DHCP ACK (agnos
 `net_dhcp.cyr`), so they are read as one answer, not four.
 
 #### `net ip: unset`
@@ -284,91 +298,133 @@ All four `net_config`#61 fields are populated by the DHCP ACK (agnos
 ```
 
 `output_diag_kv_ipv4` renders a zero field as `unset` rather than `0.0.0.0`
-(`src/output.cyr:304-309`) precisely because the two are different facts. No lease
-was ever taken: the NIC never came up, or the DISCOVER/OFFER never completed.
+precisely because the two are different facts. No lease was ever taken: the NIC
+never came up, or the DISCOVER/OFFER never completed.
 
 **Nothing about yo is wrong in this case.** There was no address to send from, so
 no packet could have left. Debug the NIC and the DHCP path, not the probe. The
-`diagnosis` line is emitted only on this condition (`platform_agnos.cyr:204`).
+`diagnosis` line is emitted only on this condition.
 
-#### Lease present but `icmp_echo #55: -1`
+### The second fork is the counters
 
-The lease is good and the kernel's one-shot echo returned `-1`. Per the
-`icmp_echo`#55 contract (agnos `kernel/core/syscall.cyr`, `num == 55`) that is
-either:
+With a lease in place, the echo returned `-1`. Per its contract (agnos
+`kernel/core/syscall.cyr`, `num == 100`) that is either no reply within the
+bound or a NIC that is down, and the syscall does not say which. The ICMP
+counters do. They are `net_config`#61 fields 4..7, present since agnos
+1.56.48:
 
-- the reply did not arrive inside the kernel's **fixed ~3 s bound**, or
-- the NIC is down.
+| Line | Counts |
+|---|---|
+| `icmp tx` | echo requests the kernel sent |
+| `icmp rx` | echo replies that matched a waiting request (identifier and sequence) |
+| `icmp timeouts` | waits that ran out without a match |
+| `pings answered` | inbound echo requests this kernel answered: someone pinged *us* |
 
-The syscall does not distinguish them, so neither does yo. From here: probe the
-gateway first (`yo --diag -c 2 <the gateway from the dump>`). A reply from the
-gateway and silence from the target puts the fault past your first hop; silence
-from both puts it at the NIC or the link.
+They are kernel-wide and never reset, so yo samples them when the target begins
+and prints how far each moved, `N this run`, beside the total. The `verdict` line
+reads the movement:
 
-### `-W` does not apply on the AGNOS backend
+- **`no echo request left this host`** — tx did not move. It is a local fault: the
+  NIC, the route to the next hop, or a failed send. The network was never tried.
+- **`requests left this host and no reply matched`** — tx moved and rx did not.
+  The fault is the path or the target, not this machine. Probe the gateway next
+  (`yo --diag -c 2 <the gateway from the dump>`): a reply there and silence from
+  the target puts the fault past your first hop.
+- **`the kernel matched replies, none of them yo's`** — rx moved, yet yo got
+  nothing. A late reply cannot do this, because the kernel clears the wait at
+  the deadline. Another process was pinging during the run, and the counters
+  are shared. Run yo again on its own.
 
-This is the most common surprise. `icmp_echo`#55 is **one-shot**: it sends one
-echo, blocks for the reply, and returns the RTT in milliseconds (`>= 0`) or `-1`.
-The timeout is a fixed bound inside the kernel's `icmp_ping` and is not a
-parameter, so there is nothing for yo to pass.
+A non-zero `pings answered` total is a cheap witness that inbound ICMP and the
+reply path work on this box.
 
-Mechanically: `-W` reaches `platform_set_recv_timeout_ms`, which stores it in
-`_ag_timeout_ms` (`platform_agnos.cyr:114-117`) — and the only reader of that
-variable is `platform_udp_recv`'s deadline, the DNS path (`:97`). The ICMP path
-(`_ag_icmp_pong`, `:59-74`) never consults it. So `-W` still shapes hostname
-*resolution* on agnos; it has no effect whatsoever on the echo. Raising it to
-work around a `-1` is wasted effort. See the ADR linked below for why the syscall
-is shaped that way.
+On a kernel older than 1.56.48 the counters do not exist; the dump says
+`icmp counters: unavailable` and the fork above is the only one there is.
+
+### `-W` on the AGNOS backend
+
+Since 0.8.x, `-W` is the reply bound on AGNOS too. `icmp_echo_ex`#100 is still
+**one-shot**: it sends one echo, blocks for the reply, and returns the RTT in
+milliseconds (`>= 0`) or `-1`. Its timeout is a parameter, and yo passes `-W`.
+The `echo timeout ms` line shows the bound the kernel was given. Two limits
+apply:
+
+- **The kernel caps the bound at 60 s.** A larger `-W` waits 60 s, and the line
+  says 60000.
+- **An agnos older than 1.56.48 has no #100.** yo detects that once per run (the
+  counters arrived in the same agnos commit, so field 4 answering -1 is the
+  tell) and falls back to `icmp_echo`#55, whose bound is a fixed ~3 s. The dump
+  then says `this kernel has no icmp_echo_ex#100 … so -W was not applied`, and
+  the echo line reads `icmp_echo #55`. Raising `-W` there is wasted effort.
 
 Two related consequences of the same contract, worth knowing before you read them
 as bugs:
 
-- **`rtt=0.00 ms` is normal.** The kernel's RTT resolution is the 100 Hz tick
-  (10 ms), so any sub-10 ms reply comes back as 0.
+- **`rtt=0.00 ms` is normal.** The RTT yo prints is measured host-side with
+  `uptime_ms`#40 at 1 ms resolution, so any sub-millisecond reply prints 0.
 - **A successful probe is a synthesised reply.** `_ag_icmp_pong` is the model
   bridge: yo's surface is POSIX-shaped (`open` → `send_to` → `recv_ext`) but
-  `icmp_echo` is one-shot. `send_to` stores the request; `recv_ext` calls
-  `icmp_echo`, then hands the stored request back with type flipped 8→0 and the
-  RFC-1071 checksum recomputed via yo's own `icmp_checksum`. The RTT yo prints is
+  the echo is one-shot. `send_to` stores the request; `recv_ext` calls the echo,
+  then hands the stored request back with type flipped 8→0 and the RFC-1071
+  checksum recomputed via yo's own `icmp_checksum`. The RTT yo prints is
   measured host-side across `send_to`..`recv_ext`. The wire bytes yo parses on
   agnos are its own — it is validating the bridge, not the reply frame.
 
+### Ctrl-C on the AGNOS backend
+
+**Ctrl-C at the agnos console stops nothing.** No console key raises a signal on
+agnos (agnos-userland-abi.md § 4.9), so there is no SIGINT to catch. To stop a
+long run from the keyboard, use a bounded `-c`.
+
+yo does handle **SIGINT** there. A parent or supervisor that sends one (`kill`#16:
+only yo's parent, yo itself or init may) ends the run with its summary, as
+Ctrl-C does on Linux. Two limits come from the kernel, where a signal is a
+pending bit that wakes no wait:
+
+- **A reply wait runs to its end.** A SIGINT that lands while the echo is waiting
+  is seen when the echo returns: at the reply, or at `-W`.
+- **The interval sleep is sliced.** It runs in steps of at most 50 ms, checking
+  for the signal before each, so a SIGINT there ends the run within about 50 ms.
+
 ### Two more AGNOS readings
 
-**`icmp_echo #55: 0`** — a non-negative value prints as a bare integer
-(`platform_agnos.cyr:212`). Since any `rtt >= 0` makes `_ag_icmp_pong`
-synthesise a reply, which makes `stats_recv(s) > 0`, which suppresses the dump, a
-`0` here means the syscall was **never called** — not that the RTT was zero. In
-practice that is the `-6` case below.
+**`icmp echo: not called`** — no request ever reached the kernel. Either every
+send was refused before it (an `-s` over 2040, say, which the 2048-byte request
+buffer refuses with `-90 EMSGSIZE`; the send errors above the summary say so),
+or a SIGINT ended the run before the first probe.
 
 **`note: no ICMPv6 syscall on agnos …`** — there is no ICMPv6 primitive in ring 3.
-`platform_icmp6_open` returns `-1` unconditionally (`platform_agnos.cyr:153`), so
-a `-6` probe exits 2 at `probe.cyr:44` having sent nothing. The v6 path on agnos
-is *unavailable*, not merely silent; the note line says so
-(`platform_agnos.cyr:195`).
+`platform_icmp6_open` returns `-1` unconditionally, so a `-6` probe exits 2
+having sent nothing. The v6 path on agnos is *unavailable*, not merely silent;
+the note line says so.
 
 ---
 
 ## Reproducing the AGNOS case locally
 
 `scripts/agnos-qemu-smoke.sh` runs the whole thing end to end: it boots a
-production agnos kernel against an ext2 rootfs carrying `/bin/agnsh` and
-`/bin/yo`, types the probe at the shell over QMP `send-key`, and echoes the
-`--diag` block out of the serial log. Point it at an empty address to get the
-failure case:
+production agnos kernel against an ext2 rootfs carrying `/bin/agnsh`, `/bin/yo`
+and `/bin/yosmoke` (its helper), types the probes at the shell over QMP
+`send-key`, and reads the output back out of the serial log. Among its runs:
 
-```sh
-YO_SMOKE_TARGET=10.0.2.99 scripts/agnos-qemu-smoke.sh
-```
+- the default target, `10.0.2.2` (the SLIRP gateway), which returns
+  `2 sent · 2 received · 0% loss`;
+- `yo -c 2 -W 500 -i 0 -n --diag 192.0.2.1`, timed in the guest. It is the
+  capture above, and the smoke asserts its counter lines and verdict;
+- two SIGINT runs, which `yosmoke` sends as yo's parent.
 
-That is the run the `10.0.2.99` capture above came from — it reports `100% loss`
-and exits non-zero, on purpose. The default target is `10.0.2.2`, the SLIRP
-gateway, which returns `2 sent · 2 received · 0% loss`. (The `ttl=` an AGNOS run
-prints is always `64` — a literal, not a hop count.)
+The empty-address failure case is printed on every run, so there is no need to
+point the default target at one. (The `ttl=` an AGNOS run prints is always
+`64` — a literal, not a hop count.)
 
 The script SKIPs (exit 0) rather than failing when the sibling checkouts
 (`../agnos`, `../gnoboot`, `../agnoshi`) or the QEMU/`parted`/`mtools` toolchain
-are missing, so a bare machine will not report a false failure.
+are missing, so a bare machine will not report a false failure. From a git
+worktree the siblings are not at `../`; point the script at them:
+
+```sh
+AGNOS_ROOT=~/Repos/agnos GNOBOOT_ROOT=~/Repos/gnoboot AGNOSHI_ROOT=~/Repos/agnoshi scripts/agnos-qemu-smoke.sh
+```
 
 One host-side caveat the script warns about in its own header: QEMU user-mode
 networking forwards guest ICMP through a *host* ping socket, which needs the
@@ -381,6 +437,6 @@ this guide applies to the machine running QEMU, not to the guest.
 ## See also
 
 - [`../adr/0002-focused-kernel-icmp-syscall.md`](../adr/0002-focused-kernel-icmp-syscall.md)
-  — why `icmp_echo`#55 is a focused one-shot primitive, and therefore why `-W`
-  cannot be honoured on the AGNOS backend.
+  — why the kernel's echo is a focused one-shot primitive, what that costs, and
+  (§ Update) how `icmp_echo_ex`#100 gave `-W` back.
 - [`getting-started.md`](getting-started.md) — build and test.

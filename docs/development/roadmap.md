@@ -1,6 +1,6 @@
 # yo — Roadmap
 
-> **Status**: Active | **Last updated**: 2026-11-08 (0.7.2, after the first P(-1) audit)
+> **Status**: Active | **Last updated**: 2026-11-08 (unreleased 0.8.x: the AGNOS `-W`, counter and SIGINT items)
 >
 > The plan from here to v1.0, then the trigger-gated backlog after it. Shipped work
 > is not listed: its record is [`CHANGELOG.md`](../../CHANGELOG.md), and the audit
@@ -18,29 +18,21 @@ The 0.7.2 P(-1) audit fixed 25 findings. `cyrius audit` is clean and gated in CI
 every new guard is mutation-checked, a fuzz harness covers every byte parser, and
 an integration harness runs the binary in a network namespace in CI.
 
-What is left before 1.0 is three bands: the AGNOS arm can now use kernel surface it
-has not yet adopted (0.8.x); Linux has portability and resolver gaps (0.9.x); and a
-set of behaviour decisions has to be made, and the surface frozen (0.10.x).
+What is left before 1.0 is three bands: backend parity (0.8.x), where the AGNOS
+arm has now adopted the kernel surface it was missing (`-W`, ICMP counters,
+SIGINT) and Linux still needs aarch64-correct syscalls; Linux portability and
+resolver gaps (0.9.x); and a set of behaviour decisions to make before the
+surface is frozen (0.10.x).
 
 ---
 
 ## 0.8.x — backend parity
 
-Each AGNOS item has its kernel arm and its cyrius wrapper already: the wrappers
-are in the vendored stdlib (`lib/syscalls_x86_64_agnos.cyr`). Nothing here waits
-on another repo.
+The AGNOS `-W`, ICMP-counter and SIGINT items shipped (CHANGELOG `[Unreleased]`).
+What they could not reach is a kernel property, recorded in `state.md` § Kernel
+coupling. agnos raises no signal from the console, so Ctrl-C at the keyboard
+reaches no program, and an ordinary signal cannot end a reply wait.
 
-- [ ] **Honour `-W` on AGNOS** through `sys_icmp_echo_ex(dst_ip, timeout_ms)`
-      (`icmp_echo_ex`#100, agnos 1.56.48). Today `-W` is silently inapplicable there,
-      because `icmp_echo`#55's bound is a fixed ~3 s. Use the wrapper, never the raw
-      number: agnos's number space overlaps Linux's on purpose.
-- [ ] **ICMP counters in `--diag` on AGNOS**: `sys_net_icmp_tx` / `_rx` /
-      `_replies_sent` / `_timeouts` (`net_config`#61 fields 4..7). `tx > 0, rx == 0`
-      is a network problem; `tx == 0` is a local one. That is the distinction the
-      AGNOS dump cannot make today.
-- [ ] **Ctrl-C on AGNOS** through `sys_sigprocmask` / `sys_signalfd` (#17 / #18).
-      `platform_install_interrupt_watch` is a `-1` stub there; the Linux arm's
-      `platform_wait_readable` / `platform_sleep_interruptible` shape is the model.
 - [ ] **aarch64-correct Linux syscalls.** `src/platform_linux.cyr` still reaches the
       original socket, file, clock and signal paths by x86_64 number (`_LX_SYS_*`).
       On aarch64, 44 is `fstatfs(2)`, not `sendto`, so an `--aarch64` build compiles
@@ -49,7 +41,9 @@ on another repo.
       `qemu-aarch64`. taar hit this exact defect at its 0.3.3.
 - [ ] **A gateway-literal run on iron** (`yo 192.168.1.1` on an AGNOS-booted box).
       The 1.51.7 burn probed a WAN host by name; the LAN-literal half of the iron
-      criterion has no evidence of its own.
+      criterion has no evidence of its own. The same burn should be the first iron
+      run of the `icmp_echo_ex`#100 path and the `--diag` counters, which have run
+      only in QEMU, and it needs an agnos of at least 1.56.48 to reach them.
 - [ ] **AGNOS execution in CI**, if a runner can boot it. The QEMU smoke is a manual
       gate: it needs the agnos, gnoboot and agnoshi checkouts plus QEMU and OVMF. The
       CI `--agnos` build only proves the arm compiles. Decide whether a cached
@@ -104,6 +98,10 @@ format as the 1.0 contract.
       the target, and iputils does not either. Filtering would harden the SOCK_RAW
       path against spoofing, but break pinging 0.0.0.0 and multicast. Since 0.7.2
       the random per-process ident already ends cross-talk.
+- [ ] **SIGTERM on AGNOS.** agnos gives SIGTERM no default action, so `kill 15`
+      does nothing to yo there; on Linux it ends yo (without a summary). Watch
+      SIGTERM beside SIGINT on AGNOS, so a supervisor's polite stop works, or
+      leave it to the supervisor's SIGKILL.
 - [ ] **The missing-resolv.conf default.** yo falls back to 1.1.1.1; glibc and musl
       use 127.0.0.1. taar holds the same decision open.
 - [ ] **Release build flags.** `CYRIUS_DCE=1` now strips dead code: 86,248 B
@@ -128,9 +126,9 @@ Ship 1.0 when all of these are true.
 - [x] **Test gates that mean something**: unit assertions with mutation-checked
       guards, a fuzz harness over every parser (also under `--poison`), and the
       namespace integration harness, all in CI.
-- [ ] **0.8.x done**: AGNOS honours `-W`, has counters and has Ctrl-C; Linux is
-      aarch64-correct and run under `qemu-aarch64` in CI; a gateway-literal iron run
-      is recorded.
+- [ ] **0.8.x done**: Linux is aarch64-correct and run under `qemu-aarch64` in CI,
+      and a gateway-literal iron run is recorded. (AGNOS `-W`, ICMP counters and
+      SIGINT are done; console Ctrl-C does not exist on agnos and is not a yo item.)
 - [ ] **0.10.x decisions made and the surface frozen.**
 - [ ] **Binary size**: no larger than the system `ping` (iputils 155,160 B). The old
       "≤ 30 KB after DCE" was an unmeasured guess and is withdrawn. Today's default

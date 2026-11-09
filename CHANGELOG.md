@@ -4,6 +4,101 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+The three AGNOS items of roadmap 0.8.x. Each uses kernel surface agnos 1.56.48
+added and the vendored stdlib already wraps; `src/` reaches it only through the
+`sys_*` wrappers, never by number. The Linux backend is unchanged apart from
+one shared check in `probe_run` (below).
+
+### Added — AGNOS backend
+
+- **`-W` is the reply bound on AGNOS.** The echo goes through
+  `sys_icmp_echo_ex(dst, -W)` (`icmp_echo_ex`#100). It used to be
+  `icmp_echo`#55, whose bound is a fixed ~3 s whatever `-W` said. The bound is
+  clamped to 1 ms … 60 s: the kernel caps at 60 s, and 0 would select its ~3 s
+  default. In the QEMU smoke, two lost probes at `-W 500` take 1077 ms; on #55
+  they took about 6 s.
+- **A kernel without #100 still works.** An agnos older than 1.56.48 has no #100
+  arm and answers -1, which would read as a timeout: every live host, the 1.51.7
+  kernel yo was iron-validated on included, would report 100% loss. yo probes
+  once per process through `net_config`#61 field 4, which arrived in the same
+  agnos commit, and falls back to #55 there. `--diag` then says `-W` was not
+  applied.
+- **ICMP counters in `--diag`.** The AGNOS dump prints `icmp tx`, `icmp rx`,
+  `icmp timeouts` and `pings answered` (`net_config`#61 fields 4..7), each as
+  `N this run (M since boot)`. The counters are kernel-wide and never reset, so
+  they are sampled when the target begins and the movement is what is reported.
+  A `verdict` line reads them:
+  - tx did not move: no request left this host, a local fault;
+  - tx moved and rx did not: the path or the target dropped them;
+  - rx moved, yet yo got nothing: another process was pinging.
+
+  On a kernel without the counters it says so.
+- **SIGINT ends an AGNOS run with a summary.** `platform_install_interrupt_watch`
+  blocks SIGINT (`sys_sigprocmask`#17) and opens a `sys_signalfd`#18 on it; it was
+  a -1 stub. The set comes from the stdlib's agnos `sigset_add`, because agnos
+  sets are `1 << sig`, not Linux's `1 << (sig - 1)`. What it can and cannot do
+  follows from the kernel:
+  - **No console key raises SIGINT on agnos** (agnos-userland-abi.md § 4.9).
+    Ctrl-C at the console reaches no program, so this is not interactive Ctrl-C.
+    The signal comes from `kill`#16, which only yo's parent, yo itself or init
+    may send: a supervisor stopping yo, for instance.
+  - **A SIGINT cannot end a reply wait.** agnos signals are pending bits with no
+    default action and do not wake a kernel wait; only kill 9 ends the echo's.
+    The wait runs to its reply or to `-W`, and the signal is seen at the next
+    check.
+  - **The interval sleep is sliced** into `sleep_ms`#41 calls of at most 50 ms
+    against an absolute deadline, with a check before each. In the smoke a SIGINT
+    in a 2 s interval ended yo 45 ms later, and the summary printed.
+
+  Before this, SIGINT did nothing at all to yo on AGNOS.
+
+### Changed
+
+- **AGNOS keeps the ICMP and UDP reply bounds apart.**
+  `platform_set_recv_timeout_ms` now stores per fd, as `SO_RCVTIMEO` is per socket
+  on Linux. One shared value used to serve both, and `-W` reached the echo only
+  because `probe_run` set it after the last DNS lookup.
+- **`probe_run` checks for an interrupt after the last probe**, which has no
+  interval sleep after it. On Linux this closes a window of microseconds. On AGNOS
+  the window is the whole last reply wait: a SIGINT during it used to be noticed
+  only when the next target's loop began, after its banner.
+- **The AGNOS `--diag` echo lines.** `icmp_echo #55: …` becomes
+  `echo timeout ms` plus `icmp_echo_ex#100: …`, or `icmp_echo #55` with a note
+  on an old kernel. When no request reached the kernel (every send refused, as
+  with `-s 3000`) the dump says `not called`; it used to print a bare `0`, which
+  read like an RTT.
+
+### Tests
+
+- **Unit: 483 → 505 assertions.** The choices the AGNOS arm makes from kernel
+  answers are pure helpers above `platform.cyr`'s `#ifdef`, so the Linux-built
+  suite holds them to their contracts: the echo bound, the #100 probe, the
+  counter verdict and the sleep slice. Written failing-first: 11 went red
+  against guard-less bodies. **12 host mutations, 12 killed.**
+- **`scripts/agnos-qemu-smoke.sh` has three more runs.** All pass:
+  - `-W 500` against an unreachable address, timed in the guest, with the
+    `--diag` counters and verdict;
+  - a SIGINT in the interval sleep;
+  - a SIGINT during the last reply wait, with a second target queued.
+
+  The SIGINT comes from `tests/agnos/yosmoke.cyr`, a small AGNOS-only parent that
+  spawns yo, signals it and times it. agnos allows no other sender, and agnsh has
+  no `kill` builtin. The smoke's key map gained capital letters, so `-W` could
+  be typed.
+- **AGNOS-side mutations, through the smoke: 6 of 6 killed.** Each is a guard the
+  host suite cannot reach, and each is caught by its own assertion:
+  - #55 only: the `-W` run took 6085 ms;
+  - no post-loop check: the second target started;
+  - totals printed for deltas: the counter lines failed;
+  - one shared bound: the `-W` run took 2084 ms;
+  - an unsliced sleep: SIGINT took 824 ms;
+  - no watch: the run went on for 55 s, all 30 sent.
+
+### Size
+
+- Linux: 200,936 → 205,104 B by default; 86,248 → 86,320 B with `CYRIUS_DCE=1`.
+  AGNOS: 215,144 → 215,968 B; 84,072 → 88,992 B with DCE.
+
 ## [0.7.2] - 2026-11-08
 
 A P(-1) review of everything yo ships found 25 issues: 1 high, 9 medium, 11 low

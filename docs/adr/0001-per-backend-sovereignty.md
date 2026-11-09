@@ -235,3 +235,20 @@ price, and it is paid knowingly.
 is not possible here. A binary emitted for the agnos target cannot issue Linux syscall 41,
 and the reverse holds too. The `#ifdef` is not a preference over runtime dispatch; runtime
 dispatch was never on the table.
+
+## Update — 2026-11-08, yo 0.8.x
+
+Two of the gaps § Consequences lists closed through kernel surface agnos 1.56.48
+added, without a POSIX call on the AGNOS path:
+
+- **`-W` is honoured** through `icmp_echo_ex`#100 (see ADR 0002 § Update), and
+  `_ag_timeout_ms` is split into an ICMP bound and a UDP bound, one per fd.
+- **The interrupt watch is real**: `sigprocmask`#17 plus `signalfd`#18 on SIGINT.
+  The semantics still diverge, and yo does not paper over it. agnos raises no
+  signal from the console, so Ctrl-C at the keyboard reaches no one, and a
+  SIGINT cannot end a reply wait. The watch serves a parent or supervisor that
+  sends SIGINT, and it is seen between probes and in the sliced interval sleep.
+- **ICMP counters reach `--diag`** (`net_config`#61 fields 4..7); the Neutral
+  bullet calling them a kernel ask is history.
+
+ICMPv6, scope IDs and a real TTL remain absent, for the reasons given above.

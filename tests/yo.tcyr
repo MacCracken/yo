@@ -1327,6 +1327,41 @@ fn main() {
     var qidv = _dns_new_qid();
     assert((qidv >= 0) && (qidv <= 0xFFFF), "query ID is 16 bits");
 
+    # ----- 0.8.0: the AGNOS decisions (pure, shared) -----
+    test_group("0.8.0: AGNOS -W, #100 probe, counters, sleep slices");
+
+    # -W through icmp_echo_ex#100: <= 0 would pick the kernel's ~3 s default.
+    assert_eq(platform_echo_timeout_ms(500), 500, "-W 500 passes through");
+    assert_eq(platform_echo_timeout_ms(1), 1, "-W 1 passes through");
+    assert_eq(platform_echo_timeout_ms(0), 1, "0 never reaches #100 (it means ~3 s)");
+    assert_eq(platform_echo_timeout_ms(0 - 5), 1, "a negative bound never reaches #100");
+    assert_eq(platform_echo_timeout_ms(60000), 60000, "60 s is the kernel's own cap");
+    assert_eq(platform_echo_timeout_ms(60001), 60000, "past 60 s: the bound the kernel uses");
+    assert_eq(platform_echo_timeout_ms(2147483647), 60000, "the largest -W: capped at 60 s");
+
+    # #100 is probed through net_config#61 field 4 (both arrived in agnos 1.56.48).
+    assert_eq(platform_echo_ex_available(0 - 1), 0, "field 4 unknown → no #100, use #55");
+    assert_eq(platform_echo_ex_available(0), 1, "an idle counter of 0 is a 1.56.48+ kernel");
+    assert_eq(platform_echo_ex_available(7), 1, "a counting kernel has #100");
+
+    # The counter verdict over one target's run: tx/rx before and after.
+    assert_eq(platform_icmp_verdict(0 - 1, 0 - 1, 0 - 1, 0 - 1), PLATFORM_ICMP_UNKNOWN,
+        "pre-1.56.48 kernel: counters unknown");
+    assert_eq(platform_icmp_verdict(0 - 1, 4, 0, 0), PLATFORM_ICMP_UNKNOWN, "tx before unknown");
+    assert_eq(platform_icmp_verdict(0, 0 - 1, 0, 0), PLATFORM_ICMP_UNKNOWN, "tx after unknown");
+    assert_eq(platform_icmp_verdict(0, 4, 0 - 1, 0), PLATFORM_ICMP_UNKNOWN, "rx before unknown");
+    assert_eq(platform_icmp_verdict(0, 4, 0, 0 - 1), PLATFORM_ICMP_UNKNOWN, "rx after unknown");
+    assert_eq(platform_icmp_verdict(9, 9, 3, 3), PLATFORM_ICMP_NONE_SENT, "tx did not move: never sent");
+    assert_eq(platform_icmp_verdict(0, 0, 0, 0), PLATFORM_ICMP_NONE_SENT, "fresh kernel, nothing sent");
+    assert_eq(platform_icmp_verdict(9, 11, 3, 3), PLATFORM_ICMP_NO_REPLY, "sent, nothing came back");
+    assert_eq(platform_icmp_verdict(9, 11, 3, 4), PLATFORM_ICMP_OTHER_REPLY,
+        "a reply matched that was not yo's");
+
+    # The interval sleep is cut into slices so a SIGINT is seen between them.
+    assert_eq(platform_sleep_slice_ms(1000), PLATFORM_SLEEP_SLICE_MS, "a long sleep is sliced");
+    assert_eq(platform_sleep_slice_ms(PLATFORM_SLEEP_SLICE_MS), PLATFORM_SLEEP_SLICE_MS, "one whole slice");
+    assert_eq(platform_sleep_slice_ms(7), 7, "the tail sleeps what is left");
+
     # ----- A, G, S: which frames count as the reply -----
     test_group("audit A+G+S: reply acceptance");
 

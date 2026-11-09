@@ -1,0 +1,112 @@
+# yosmoke.cyr — a helper for scripts/agnos-qemu-smoke.sh: run a command as a
+# child, signal it, time it. AGNOS only.
+#
+#   yosmoke time <cmd...>                run cmd; report its status and how long it ran
+#   yosmoke sigint <delay_ms> <cmd...>   run cmd, send it SIGINT after delay_ms; report
+#                                        its status and how long it took to exit after that
+#
+# One line out: `yosmoke: <mode> exit=<status> ms=<elapsed> kill=<rc> done`. For
+# `sigint`, ms counts from the signal and kill is kill#16's answer; for `time`,
+# kill is 0. A setup failure prints `yosmoke: <what> failed` and exits 1.
+#
+# WHY A HELPER. Testing yo's AGNOS interrupt watch needs a SIGINT, and on agnos
+# only a process's parent, the process itself or init may send one (kill#16). No
+# console key raises one, and agnsh has no kill builtin. So the smoke types
+# `yosmoke sigint ...`, and yosmoke, as yo's parent, sends it. Timing -W here
+# too keeps the measurement inside the guest, away from QMP typing and serial
+# polling.
+#
+# Build: cyrius build --agnos tests/agnos/yosmoke.cyr build/yosmoke-agnos
+# The smoke builds it and puts it on the image as /bin/yosmoke. It is never built
+# for Linux, and nothing yo ships includes it.
+
+var _ys_line[16];                  # 128 B: the child's #43 line (<= 127 B + NUL)
+
+# Write a C string to stdout.
+fn _ys_puts(s): i64 {
+    sys_write(1, s, strlen(s));
+    return 0;
+}
+
+# Print `yosmoke: <what> failed` and return 1, the exit status for a setup failure.
+fn _ys_fail(what): i64 {
+    _ys_puts("yosmoke: ");
+    _ys_puts(what);
+    _ys_puts(" failed\n");
+    return 1;
+}
+
+# Join argv[from..] with single spaces into _ys_line, the spawn_path#43 line
+# form. Returns its length, or -1 if it is empty or longer than SPAWN_LINE_MAX.
+fn _ys_join(from): i64 {
+    var n = 0;
+    var i = from;
+    var ac = argc();
+    while (i < ac) {
+        var a = argv(i);
+        var al = strlen(a);
+        var sep = 0;
+        if (n > 0) { sep = 1; }
+        if (n + sep + al > SPAWN_LINE_MAX) { return 0 - 1; }
+        if (sep == 1) { store8(&_ys_line + n, 32); n = n + 1; }
+        var j = 0;
+        while (j < al) { store8(&_ys_line + n + j, load8(a + j)); j = j + 1; }
+        n = n + al;
+        i = i + 1;
+    }
+    if (n == 0) { return 0 - 1; }
+    store8(&_ys_line + n, 0);
+    return n;
+}
+
+# Print the one result line.
+fn _ys_report(mode, status, ms, krc): i64 {
+    _ys_puts("yosmoke: ");
+    _ys_puts(mode);
+    _ys_puts(" exit=");
+    fmt_int(status);
+    _ys_puts(" ms=");
+    fmt_int(ms);
+    _ys_puts(" kill=");
+    fmt_int(krc);
+    _ys_puts(" done\n");
+    return 0;
+}
+
+# Parse the mode, run the child, report. Returns the process exit status.
+fn main(): i64 {
+    args_init();
+    if (argc() < 3) {
+        _ys_puts("usage: yosmoke time <cmd...> | yosmoke sigint <delay_ms> <cmd...>\n");
+        return 2;
+    }
+    var mode = argv(1);
+    var first = 2;
+    var delay = 0 - 1;
+    if (streq(mode, "sigint") == 1) {
+        if (argc() < 4) { return _ys_fail("sigint without a command"); }
+        delay = atoi(argv(2));
+        first = 3;
+    } elif (streq(mode, "time") != 1) {
+        return _ys_fail("unknown mode");
+    }
+    var len = _ys_join(first);
+    if (len < 0) { return _ys_fail("command line (empty, or over 127 bytes)"); }
+
+    var t0 = sys_uptime_ms();
+    var pid = sys_spawn_path(&_ys_line, len);
+    if (pid < 0) { return _ys_fail("spawn"); }
+    var krc = 0;
+    if (delay >= 0) {
+        if (delay > 0) { sys_sleep_ms(delay); }
+        t0 = sys_uptime_ms();
+        krc = sys_kill(pid, SIGINT);
+    }
+    var st = sys_waitpid_block(pid);
+    var ms = sys_uptime_ms() - t0;
+    _ys_report(mode, st, ms, krc);
+    return 0;
+}
+
+var r = main();
+sys_exit_group(r);

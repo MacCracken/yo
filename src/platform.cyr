@@ -8,15 +8,18 @@
 #                            libc). Unprivileged AF_INET SOCK_DGRAM ICMP with a
 #                            SOCK_RAW fallback.
 #   src/platform_agnos.cyr   No POSIX. Sovereign ring-3 agnos syscalls —
-#                            icmp_echo(#55), udp_bind/send/recv/unbind (#51-54),
-#                            net_config(#61), getrandom(#45), uptime/sleep
-#                            (#40/#41). Landed 0.5.3; iron-validated on the agnos
-#                            1.51.7 burn; gated in CI by `cyrius build --agnos`
-#                            and locally by scripts/agnos-qemu-smoke.sh.
+#                            icmp_echo_ex(#100, or icmp_echo #55 before agnos
+#                            1.56.48), udp_bind/send/recv/unbind (#51-54),
+#                            net_config(#61, address fields and ICMP counters),
+#                            sigprocmask/signalfd (#17/#18), getrandom(#45),
+#                            uptime/sleep (#40/#41). Landed 0.5.3; iron-validated
+#                            on the agnos 1.51.7 burn; gated in CI by `cyrius
+#                            build --agnos` and locally by scripts/agnos-qemu-smoke.sh.
 #
 # The two are NOT at feature parity, and that is deliberate rather than unfinished
-# — the AGNOS arm stubs what the kernel does not expose (ICMPv6, ifindex, signal
-# infra) and cannot honour -W. See docs/adr/0001-per-backend-sovereignty.md for
+# — the AGNOS arm stubs what the kernel does not expose (ICMPv6, ifindex, a real
+# TTL), and its SIGINT handling is bounded by the kernel (no console signal, and
+# no signal ends a reply wait). See docs/adr/0001-per-backend-sovereignty.md for
 # the rule and docs/adr/0002-focused-kernel-icmp-syscall.md for the costs.
 #
 # Windows / macOS are post-1.0 (roadmap.md § v1 backlog). They are host kernels, so
@@ -38,6 +41,70 @@ fn platform_peer_match(from, peer_ip, peer_port): i64 {
     if (load64(from) != peer_ip) { return 0; }
     if (load64(from + 8) != peer_port) { return 0; }
     return 1;
+}
+
+# --- AGNOS decisions, pure so the host suite can test them (0.8.0) ----------
+#
+# Each is a choice platform_agnos.cyr makes from a kernel answer. The kernel
+# calls themselves cannot run on the host, but the choices can, so they live
+# here and tests/yo.tcyr holds them to their contracts.
+
+# The longest wait icmp_echo_ex#100 honours: the agnos arm clamps to 60 s.
+var PLATFORM_ECHO_EX_MAX_MS = 60000;
+
+# The bound handed to icmp_echo_ex#100 for a -W of `ms`: 1..60000. A value
+# <= 0 would select the kernel's ~3 s default, the very bound -W replaces, so
+# it is raised to 1 ms rather than passed on. The CLI already refuses -W 0;
+# this keeps the backend from depending on that. Above 60 s the kernel clamps,
+# and clamping here too keeps --diag's timeout line the bound actually used.
+fn platform_echo_timeout_ms(ms): i64 {
+    if (ms < 1) { return 1; }
+    if (ms > PLATFORM_ECHO_EX_MAX_MS) { return PLATFORM_ECHO_EX_MAX_MS; }
+    return ms;
+}
+
+# Does this agnos kernel have icmp_echo_ex#100? `icmp_tx` is net_config#61
+# field 4, which arrived in the same agnos commit (1.56.48) as #100. An older
+# kernel answers -1 to both, and #100's -1 reads as a timeout: an unprobed
+# call would report every live host dead on, for one, the 1.51.7 kernel yo was
+# iron-validated on. A count of 0 is a healthy idle kernel, not an unknown
+# one; only a negative answer means the arm is missing. 1 = #100, 0 = #55.
+fn platform_echo_ex_available(icmp_tx): i64 {
+    if (icmp_tx < 0) { return 0; }
+    return 1;
+}
+
+# What net_config#61's ICMP counters say about a target that got no reply.
+var PLATFORM_ICMP_UNKNOWN     = 0;   # a counter read -1: the kernel predates them
+var PLATFORM_ICMP_NONE_SENT   = 1;   # no echo request left the host: a local fault
+var PLATFORM_ICMP_NO_REPLY    = 2;   # requests left, nothing matched: the network
+var PLATFORM_ICMP_OTHER_REPLY = 3;   # replies matched, none of them yo's
+
+# Read the ICMP counters across one target's run: tx/rx as sampled when the
+# run began (tx0, rx0) and when it ended (tx1, rx1). The counters are
+# kernel-wide and count from boot, so only the movement during the run says
+# anything about this run. Any sample of -1 means a kernel older than 1.56.48,
+# which has no counters. A late reply cannot move rx (the kernel clears the
+# wait slot at the deadline), so rx moving with no reply for yo means another
+# process was pinging at the same time.
+fn platform_icmp_verdict(tx0, tx1, rx0, rx1): i64 {
+    if ((tx0 < 0) || (tx1 < 0)) { return PLATFORM_ICMP_UNKNOWN; }
+    if ((rx0 < 0) || (rx1 < 0)) { return PLATFORM_ICMP_UNKNOWN; }
+    if (tx1 <= tx0) { return PLATFORM_ICMP_NONE_SENT; }
+    if (rx1 <= rx0) { return PLATFORM_ICMP_NO_REPLY; }
+    return PLATFORM_ICMP_OTHER_REPLY;
+}
+
+# The longest single sleep_ms#41 the AGNOS interval sleep takes before it
+# looks at the signalfd again, so the most a SIGINT waits to be seen there.
+var PLATFORM_SLEEP_SLICE_MS = 50;
+
+# How long the next slice of an interruptible AGNOS sleep is, with `left_ms`
+# of the interval to go. An agnos signal wakes no sleep_ms#41 (a signal is a
+# pending bit with no default action), so the sleep is cut into slices.
+fn platform_sleep_slice_ms(left_ms): i64 {
+    if (left_ms > PLATFORM_SLEEP_SLICE_MS) { return PLATFORM_SLEEP_SLICE_MS; }
+    return left_ms;
 }
 
 #ifdef CYRIUS_TARGET_AGNOS
